@@ -742,7 +742,7 @@ export function RotaView() {
                             );
                             const a = list[rowIdx];
                             return (
-                              <td key={`${isoDate}${slot.start}${slot.end}${ward.name}${rowIdx}`} className={`border p-1 text-center truncate max-w-[70px] text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}>
+                              <td key={`${isoDate}${slot.start}${slot.end}${ward.name}${rowIdx}`} className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}>
                                 {a ? getPharmacistName(a.pharmacistId) : ''}
                               </td>
                             );
@@ -870,6 +870,40 @@ export function RotaView() {
                       return (
                         <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center">
                           {unavailable.map((p: any) => p.name).join(', ') || ''}
+                        </td>
+                      );
+                    });
+                  })}
+                </tr>
+                {/* --- Management Time --- */}
+                <tr>
+                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2}>Management Time</td>
+                  {[0,1,2,3,4].flatMap((dayOffset: number) => {
+                    const date = new Date(selectedMonday);
+                    date.setDate(date.getDate() + dayOffset);
+                    const isoDate = date.toISOString().split('T')[0];
+                    return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
+                      // Find Band 8a pharmacists in Management Time for this date/slot
+                      const managementAssignments = rotaAssignments.filter(a => 
+                        a.type === "management" && 
+                        a.date === isoDate && 
+                        ((a.startTime <= slot.start && a.endTime > slot.start) || 
+                         (a.startTime < slot.end && a.endTime >= slot.end) ||
+                         (a.startTime >= slot.start && a.endTime <= slot.end))
+                      );
+                      
+                      // Get pharmacist names
+                      const pharmacistNames = managementAssignments.map(a => getPharmacistName(a.pharmacistId)).filter(Boolean);
+                      
+                      return (
+                        <td
+                          key={isoDate + slot.start + slot.end + 'management'}
+                          className={`border p-1 text-center max-w-[70px] text-xs align-middle whitespace-normal bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`}
+                          style={{ borderBottomWidth: 1, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                        >
+                          {pharmacistNames.length > 0 ? (
+                            <span>{pharmacistNames.join(", ")}</span>
+                          ) : null}
                         </td>
                       );
                     });

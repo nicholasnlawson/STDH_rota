@@ -68,7 +68,7 @@ const applicationTables = {
     assignments: v.array(
       v.object({
         pharmacistId: v.id("pharmacists"),
-        type: v.union(v.literal("ward"), v.literal("dispensary"), v.literal("clinic")),
+        type: v.union(v.literal("ward"), v.literal("dispensary"), v.literal("clinic"), v.literal("management")),
         location: v.string(),
         startTime: v.string(),
         endTime: v.string(),
