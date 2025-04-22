@@ -41,6 +41,7 @@ export const generateRota = internalMutation({
     dispensaryDutyCounts: v.optional(v.record(v.string(), v.number())),
     weeklyClinicAssignments: v.optional(v.record(v.string(), v.number())),
     singlePharmacistDispensaryDays: v.optional(v.array(v.string())),
+    regenerateRota: v.optional(v.boolean())
   },
   handler: async (ctx, args) => {
     // Get all the requirements
@@ -593,7 +594,6 @@ export const generateRota = internalMutation({
       { start: "13:00", end: "15:00" },
       { start: "15:00", end: "17:00" }
     ];
-    const lunchSlot = { start: "13:30", end: "14:00" };
     // Find dispensary pharmacist(s)
     const dispensaryPharmacists = pharmacists.filter(p => 
       p && 
@@ -627,8 +627,8 @@ export const generateRota = internalMutation({
           args.pharmacistIds.includes(p._id) && 
           p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
           p._id !== dp._id && // Not the main dispensary pharmacist
-          !hasClinicConflict(p._id, lunchSlot.start, lunchSlot.end, assignments) &&
-          !isPharmacistNotAvailable(p, dayLabel, lunchSlot.start, lunchSlot.end) &&
+          !hasClinicConflict(p._id, "13:30", "14:00", assignments) &&
+          !isPharmacistNotAvailable(p, dayLabel, "13:30", "14:00") &&
           !warfarinClinicPharmacists.has(p._id)
         );
         
@@ -671,8 +671,8 @@ export const generateRota = internalMutation({
             pharmacistId: lunchCover._id,
             type: "dispensary",
             location: "Dispensary (Lunch Cover)",
-            startTime: lunchSlot.start,
-            endTime: lunchSlot.end,
+            startTime: "13:30",
+            endTime: "14:00",
             isLunchCover: true
           });
         } else {
@@ -746,6 +746,11 @@ export const generateRota = internalMutation({
         const mainPharmacist = getJuniorPharmacists();
         
         if (mainPharmacist) {
+          // Add this pharmacist to the fullDayDispensaryPharmacists set to exclude from ward assignments
+          const fullDayDispensaryPharmacists = new Set<Id<"pharmacists">>();
+          fullDayDispensaryPharmacists.add(mainPharmacist._id);
+          console.log(`[generateRota] Pharmacist ${mainPharmacist.name} assigned to full-day dispensary duty in single pharmacist mode - will be excluded from ward assignments`);
+          
           // Assign main pharmacist to all shifts except lunch
           dispensaryShifts.forEach(shift => {
             if (!(shift.start === "13:00" && shift.end === "15:00")) { // not lunch
@@ -768,8 +773,8 @@ export const generateRota = internalMutation({
             p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
             p.band !== "Dispensary Pharmacist" && // Exclude dispensary pharmacists
             !warfarinClinicPharmacists.has(p._id) &&
-            !hasClinicConflict(p._id, lunchSlot.start, lunchSlot.end, assignments) &&
-            !isPharmacistNotAvailable(p, dayLabel, lunchSlot.start, lunchSlot.end)
+            !hasClinicConflict(p._id, "13:30", "14:00", assignments) &&
+            !isPharmacistNotAvailable(p, dayLabel, "13:30", "14:00")
           );
           
           // Get zero-duty pharmacists first
@@ -800,8 +805,8 @@ export const generateRota = internalMutation({
                 pharmacistId: lunchCover._id,
                 type: "dispensary",
                 location: "Dispensary (Lunch Cover)",
-                startTime: lunchSlot.start,
-                endTime: lunchSlot.end,
+                startTime: "13:30",
+                endTime: "14:00",
                 isLunchCover: true
               });
             }
@@ -823,77 +828,12 @@ export const generateRota = internalMutation({
         // Original multiple-pharmacist logic for days without dispensary pharmacist
         console.log('[generateRota] Using multiple-pharmacist mode for dispensary coverage');
         
-        // First, handle lunch cover separately - we want to prioritize senior pharmacists and 
-        // those with warfarin clinic duties for this shorter 30-minute slot
-        const lunchSlot = { start: "13:30", end: "14:00" };
+        // For 2-hour slot mode, treat all slots equally including the lunch slot (13:00-15:00)
+        // No special handling for lunch cover when using multiple-pharmacist mode
+        console.log('[generateRota] In multiple-pharmacist mode, treating all dispensary slots equally');
         
-        // Find eligible pharmacists for lunch cover, prioritizing:
-        // 1. Senior pharmacists (band 8a)
-        // 2. Pharmacists with warfarin clinic duties (if they're available during lunch)
-        // 3. Junior pharmacists (band 6/7) as a last resort
-        
-        // Get senior pharmacists first for lunch
-        let lunchCoverCandidates = pharmacists.filter(p => 
-          p && 
-          args.pharmacistIds.includes(p._id) && 
-          p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
-          p.band === "8a" // Senior pharmacists first
-        );
-        
-        // If no senior pharmacists available, try warfarin-trained pharmacists who aren't assigned to warfarin clinics today
-        if (lunchCoverCandidates.length === 0) {
-          lunchCoverCandidates = pharmacists.filter(p => 
-            p && 
-            args.pharmacistIds.includes(p._id) && 
-            p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
-            p.warfarinTrained &&
-            !warfarinClinicPharmacists.has(p._id) && // Not already assigned to a warfarin clinic today
-            !hasClinicConflict(p._id, lunchSlot.start, lunchSlot.end, assignments) &&
-            !isPharmacistNotAvailable(p, dayLabel, lunchSlot.start, lunchSlot.end)
-          );
-        }
-        
-        // If still no candidates, use any available pharmacist for lunch
-        if (lunchCoverCandidates.length === 0) {
-          lunchCoverCandidates = pharmacists.filter(p => 
-            p && 
-            args.pharmacistIds.includes(p._id) && 
-            p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
-            !hasClinicConflict(p._id, lunchSlot.start, lunchSlot.end, assignments) &&
-            !isPharmacistNotAvailable(p, dayLabel, lunchSlot.start, lunchSlot.end)
-          );
-        }
-        
-        // Shuffle candidates to ensure random selection among equals
-        lunchCoverCandidates = shuffleArray(lunchCoverCandidates);
-        
-        // Assign lunch cover if we have a candidate
-        if (lunchCoverCandidates.length > 0) {
-          const lunchCoverPharmacist = lunchCoverCandidates[0];
-          if (lunchCoverPharmacist) { // Add null check
-            assignments.push({
-              pharmacistId: lunchCoverPharmacist._id,
-              type: "dispensary",
-              location: "Dispensary (Lunch Cover)",
-              startTime: lunchSlot.start,
-              endTime: lunchSlot.end,
-              isLunchCover: true
-            });
-            console.log(`[generateRota] Assigned ${lunchCoverPharmacist.name} to lunch cover`);
-          }
-        } else {
-          conflicts.push({
-            type: "dispensary",
-            description: "No pharmacist available for dispensary lunch cover.",
-            severity: "warning"
-          });
-        }
-        
-        // Now handle the regular 2-hour dispensary shifts
-        // We will specifically exclude the lunchSlot which is now handled separately
-        let regularDispensaryShifts = dispensaryShifts.filter(shift => 
-          !(shift.start === "13:00" && shift.end === "15:00")
-        );
+        // Use all dispensary shifts - no special handling for lunch
+        let regularDispensaryShifts = [...dispensaryShifts];
         
         // Calculate how many shifts need to be assigned
         const totalShifts = regularDispensaryShifts.length;
@@ -990,6 +930,66 @@ export const generateRota = internalMutation({
       }
     }
     
+    // Create a set to track pharmacists assigned to full-day dispensary duty
+    const fullDayDispensaryPharmacists = new Set<Id<"pharmacists">>();
+
+    // Check if this is a single-pharmacist dispensary day
+    const isSinglePharmacistDay = Array.isArray(args.singlePharmacistDispensaryDays) && 
+                               args.singlePharmacistDispensaryDays.includes(args.date);
+
+    // Check if we need to regenerate the rota due to dispensary mode changes
+    if (args.regenerateRota && isSinglePharmacistDay) {
+      console.log('[generateRota] Regenerating rota due to dispensary mode changes');
+      
+      // Look for dispensary assignments that cover the full day
+      const dispensaryAssignments = assignments.filter(a => 
+        a.type === "dispensary" && 
+        a.location === "Dispensary" && 
+        !a.location.includes("Lunch Cover")
+      );
+      
+      // Group by pharmacist ID to find who has multiple assignments
+      const pharmacistAssignmentCounts: Record<string, number> = {};
+      dispensaryAssignments.forEach(a => {
+        const id = a.pharmacistId.toString();
+        pharmacistAssignmentCounts[id] = (pharmacistAssignmentCounts[id] || 0) + 1;
+      });
+      
+      // If a pharmacist has 3+ dispensary assignments, they're likely on full-day duty
+      Object.entries(pharmacistAssignmentCounts).forEach(([id, count]) => {
+        if (count >= 3) {
+          const pharmacistId = id as unknown as Id<"pharmacists">;
+          fullDayDispensaryPharmacists.add(pharmacistId);
+          
+          // Find the pharmacist name for better logging
+          const pharmacist = pharmacists.find(p => p && p._id === pharmacistId);
+          console.log(`[generateRota] Pharmacist ${pharmacist?.name || pharmacistId} assigned to full-day dispensary duty - will be excluded from ward assignments`);
+        }
+      });
+      
+      // Remove any ward assignments for pharmacists who are now on full-day dispensary duty
+      if (fullDayDispensaryPharmacists.size > 0) {
+        // Find and remove any existing ward assignments for these pharmacists
+        const assignmentsToRemove = assignments.filter(a => 
+          a.type === "ward" && 
+          fullDayDispensaryPharmacists.has(a.pharmacistId)
+        );
+        
+        if (assignmentsToRemove.length > 0) {
+          console.log(`[generateRota] Removing ${assignmentsToRemove.length} ward assignments for pharmacists on full-day dispensary duty`);
+          
+          // Remove these assignments
+          const updatedAssignments = assignments.filter(a => 
+            !(a.type === "ward" && fullDayDispensaryPharmacists.has(a.pharmacistId))
+          );
+          
+          // Replace the assignments array with the filtered version
+          assignments.length = 0;
+          assignments.push(...updatedAssignments);
+        }
+      }
+    }
+
     // --- 3. WARD ASSIGNMENTS ---
     // Build list of active wards with directorate
     const activeWards = directorates.flatMap(d =>
@@ -1012,7 +1012,14 @@ export const generateRota = internalMutation({
     // Pool pharmacists eligible for ward duties (exclude dispensary & EAU Practitioner)
     let wardPharmacists = pharmacists.filter(p =>
       p && p.band !== "Dispensary Pharmacist" && p.band !== "EAU Practitioner"
+      // Exclude pharmacists assigned to full-day dispensary shifts
+      && !fullDayDispensaryPharmacists.has(p._id)
     ) as NonNullable<typeof pharmacists[0]>[];
+
+    // Log excluded pharmacists
+    if (fullDayDispensaryPharmacists.size > 0) {
+      console.log(`[generateRota] Excluded ${fullDayDispensaryPharmacists.size} pharmacist(s) from ward assignments due to full-day dispensary duty`);
+    }
 
     // Helper to score pharmacist–ward match (lower is better)
     function wardMatchScore(p: any, w: any): number {
@@ -1108,13 +1115,22 @@ export const generateRota = internalMutation({
       // Special handling for band 6 pharmacists - we should try to "bump" a band 7 from this directorate
       // to make room if possible
       if (!targetWard && p.band === "6") {
-        console.log(`[generateRota] PASS 1: No available wards in ${p.primaryDirectorate} for band 6 ${p.name} - checking if we can reassign a band 7`);
+        // Check if the Band 6 pharmacist has training in this directorate
+        const hasTrainingInDirectorate = Array.isArray(p.trainedDirectorates) && 
+                                        p.trainedDirectorates.includes(p.primaryDirectorate);
+        
+        if (!hasTrainingInDirectorate) {
+          console.log(`[generateRota] PASS 1: Band 6 ${p.name} has NO TRAINING in ${p.primaryDirectorate} - checking if we can reassign a band 7`);
+        } else {
+          console.log(`[generateRota] PASS 1: Band 6 ${p.name} HAS TRAINING in ${p.primaryDirectorate} but no available wards - will NOT reassign a band 7`);
+          return; // Skip reassignment since the Band 6 has training in this directorate
+        }
         
         // Check for any band 7 pharmacists who have been assigned to this directorate already
         const directorate = p.primaryDirectorate;
         interface PharmacistAssignment {
           assignment: Assignment;
-          pharmacist: NonNullable<(typeof pharmacists)[0]>;
+          pharmacist: NonNullable<typeof pharmacists[0]>;
           ward: any;
           isPrimaryWard: boolean;
           isDefault: boolean;
@@ -1168,7 +1184,7 @@ export const generateRota = internalMutation({
             (targetToReplace.isPrimaryWard ? "despite being DEFAULT and in primary ward" : "despite being DEFAULT but not in primary ward") : 
             (targetToReplace.isPrimaryWard ? "non-default but in primary ward" : "non-default and not in primary ward");
           
-          console.log(`[generateRota] PASS 1: Found band 7 ${targetToReplace.pharmacist.name} in ${directorate} who could be moved (${moveReason}) to make room for band 6 ${p.name}`);
+          console.log(`[generateRota] PASS 1: Found band 7 ${targetToReplace.pharmacist.name} in ${directorate} who could be moved (${moveReason}) to make room for band 6 ${p.name} who has NO TRAINING in this directorate`);
           
           // Remove the band 7's assignment
           const idxToRemove = assignments.findIndex(a => 
@@ -1263,6 +1279,14 @@ export const generateRota = internalMutation({
         .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
         .filter(p => p.band !== "8a" || p.primaryDirectorate === directorate)
         .sort((a, b) => {
+          // First prioritize non-default pharmacists over default ones
+          const aIsDefault = a.isDefaultPharmacist ? 10 : 0;
+          const bIsDefault = b.isDefaultPharmacist ? 10 : 0;
+          const defaultDiff = aIsDefault - bIsDefault;
+          
+          // If default status differences exist, prioritize by that
+          if (defaultDiff !== 0) return defaultDiff;
+          
           // First prioritize band 7 pharmacists over band 6 for being moved outside primary directorate
           const aIsBand7 = a.band === "7" ? -5 : 0;
           const bIsBand7 = b.band === "7" ? -5 : 0;
@@ -1277,8 +1301,8 @@ export const generateRota = internalMutation({
           return (aTrainedInDir - bTrainedInDir);
         });
       
-      console.log(`[generateRota] PASS 2: Candidates for empty directorate ${directorate} prioritizing band 7 over 6:`, 
-        candidates.map(p => `${p.name} (Band ${p.band}${p.trainedDirectorates?.includes(directorate) ? ', trained' : ''})`));
+      console.log(`[generateRota] PASS 2: Candidates for empty directorate ${directorate} prioritizing non-default and band 7 over default and band 6:`, 
+        candidates.map(p => `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, Band ${p.band}${p.trainedDirectorates?.includes(directorate) ? ', trained' : ''})`));
       
       if (candidates.length > 0) {
         const chosenPharmacist = candidates[0];
@@ -1305,7 +1329,27 @@ export const generateRota = internalMutation({
 
     // PASS 3: Ensure minimum pharmacists per ward
     for (const w of activeWards) {
-      let assignedCount = assignments.filter(a => a.type === "ward" && a.location === w.name).length;
+      let assignedCount = 0;
+      const wardAssignments = assignments.filter(a => a.type === "ward" && a.location === w.name);
+      
+      // Count each assignment, with EAU Practitioners counting as 0.5
+      for (const assignment of wardAssignments) {
+        const pharmacist = pharmacists.find(p => p && p._id === assignment.pharmacistId);
+        
+        if (pharmacist) {
+          if (pharmacist.band === "EAU Practitioner") {
+            // EAU Practitioners count as 0.5
+            assignedCount += 0.5;
+            console.log(`[generateRota] PASS 3: Counting EAU Practitioner ${pharmacist.name} as 0.5 for ward ${w.name}`);
+          } else {
+            // Regular pharmacists count as 1
+            assignedCount += 1;
+          }
+        }
+      }
+      
+      console.log(`[generateRota] PASS 3: Ward ${w.name} has ${assignedCount} pharmacist equivalents (minimum required: ${Math.ceil(w.minPharmacists)})`);
+      
       while (assignedCount < Math.ceil(w.minPharmacists)) {
         const candidates = wardPharmacists
           .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
@@ -1323,7 +1367,24 @@ export const generateRota = internalMutation({
     let wardIndex = 0;
     while (wardPharmacists.length > 0) {
       const w = activeWards[wardIndex % activeWards.length];
-      const count = assignments.filter(a => a.type === "ward" && a.location === w.name).length;
+      let count = 0;
+      const wardAssignments = assignments.filter(a => a.type === "ward" && a.location === w.name);
+      
+      // Count each assignment, with EAU Practitioners counting as 0.5
+      for (const assignment of wardAssignments) {
+        const pharmacist = pharmacists.find(p => p && p._id === assignment.pharmacistId);
+        
+        if (pharmacist) {
+          if (pharmacist.band === "EAU Practitioner") {
+            // EAU Practitioners count as 0.5
+            count += 0.5;
+          } else {
+            // Regular pharmacists count as 1
+            count += 1;
+          }
+        }
+      }
+      
       if (count < w.idealPharmacists) {
         const candidates = wardPharmacists
           .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
@@ -1430,10 +1491,8 @@ export const generateRota = internalMutation({
       return 0;
     });
     
-    console.log(`[generateRota] PASS 4.5: Sorting remaining pharmacists to prioritize band 7 for movement:`, 
-      remainingPharmacistsSorted.map(p => 
-        `${p.name} (Band ${p.band}${p.isDefaultPharmacist ? ', Default' : ''})`
-      ));
+    console.log(`[generateRota] PASS 4.5: Sorting remaining pharmacists to prioritize non-default and band 7 for movement:`, 
+      remainingPharmacistsSorted.map(p => `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, Band ${p.band})`));
     
     for (const p of remainingPharmacistsSorted) {
       if (isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59")) {
@@ -1555,7 +1614,7 @@ export const generateRota = internalMutation({
     
     console.log(`[generateRota] PASS 4.5: Completed. ${wardPharmacists.length} pharmacists STILL unassigned (likely unavailable on ${dayLabel})`);
 
-    // PASS 5: Assign remaining pharmacists to their primary directorate if possible
+    // PASS 5: Assign remaining pharmacists with no primary ward to their primary directorate if possible
     for (const p of [...wardPharmacists]) {
       if (!p.primaryDirectorate || isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59")) continue;
       
@@ -1596,7 +1655,24 @@ export const generateRota = internalMutation({
     wardIndex = 0;
     while (wardPharmacists.length > 0) {
       const w = activeWards[wardIndex % activeWards.length];
-      const count = assignments.filter(a => a.type === "ward" && a.location === w.name).length;
+      let count = 0;
+      const wardAssignments = assignments.filter(a => a.type === "ward" && a.location === w.name);
+      
+      // Count each assignment, with EAU Practitioners counting as 0.5
+      for (const assignment of wardAssignments) {
+        const pharmacist = pharmacists.find(p => p && p._id === assignment.pharmacistId);
+        
+        if (pharmacist) {
+          if (pharmacist.band === "EAU Practitioner") {
+            // EAU Practitioners count as 0.5
+            count += 0.5;
+          } else {
+            // Regular pharmacists count as 1
+            count += 1;
+          }
+        }
+      }
+      
       if (count < w.idealPharmacists) {
         const candidates = wardPharmacists
           .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
@@ -1715,6 +1791,7 @@ export const generateWeeklyRota = mutation({
     clinicIds: v.optional(v.array(v.id("clinics"))),
     pharmacistWorkingDays: v.optional(v.record(v.string(), v.array(v.string()))),
     singlePharmacistDispensaryDays: v.optional(v.array(v.string())),
+    regenerateRota: v.optional(v.boolean())
   },
   handler: async (ctx, args): Promise<Id<"rotas">[]> => {
     console.log('TEST LOG: generateWeeklyRota called with args:', JSON.stringify(args));
@@ -1787,6 +1864,7 @@ export const generateWeeklyRota = mutation({
         dispensaryDutyCounts: { ...dispensaryDutyCounts }, // Pass current counts
         weeklyClinicAssignments: { ...weeklyClinicAssignments }, // NEW: Pass clinic assignment counts
         singlePharmacistDispensaryDays: args.singlePharmacistDispensaryDays,
+        regenerateRota: args.regenerateRota
       });
       
       // After rota is generated, update the counts for both regular dispensary shifts and lunch cover

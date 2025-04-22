@@ -26,6 +26,7 @@ export function RotaView() {
   const [rotaAssignments, setRotaAssignments] = useState<any[]>([]);
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
+  const [pharmacistSearch, setPharmacistSearch] = useState("");
 
   // Log rotaAssignments changes
   useEffect(() => {
@@ -174,6 +175,26 @@ export function RotaView() {
     });
   }
 
+  // --- Add helper to determine pharmacist cell color ---
+  function getPharmacistCellClass(pharmacistId: string) {
+    const p = pharmacists.find((p: any) => p._id === pharmacistId);
+    if (!p) return '';
+    switch (p.band) {
+      case 'Dispensary Pharmacist':
+        return 'bg-purple-100 text-purple-800 border-purple-300';
+      case 'EAU Practitioner':
+        return 'bg-blue-900 text-white border-blue-900';
+      case '8a':
+        return 'bg-green-700 text-white';
+      case '7':
+        return 'bg-green-500 text-white';
+      case '6':
+        return 'bg-green-100 text-green-800';
+      default:
+        return '';
+    }
+  }
+
   // --- LOGGING: Pharmacist Working Days Initialization Effect ---
   useEffect(() => {
     if (!pharmacists || pharmacists.length === 0) return;
@@ -291,7 +312,7 @@ export function RotaView() {
   }, [selectedMonday]);
 
   // Modified regeneration function to accept state override
-  async function handleGenerateWeeklyRota(overrideSinglePharmacistDays?: string[]) {
+  async function handleGenerateWeeklyRota(overrideSinglePharmacistDays?: string[], regenerateRota?: boolean) {
     // Prevent concurrent runs
     if (generatingWeekly) {
       console.warn('[handleGenerateWeeklyRota] Already generating, skipping concurrent call.');
@@ -313,6 +334,7 @@ export function RotaView() {
         clinicIds: selectedClinicIds,
         pharmacistWorkingDays: pharmacistWorkingDays,
         singlePharmacistDispensaryDays: daysToUse, // Pass the determined state
+        regenerateRota: regenerateRota, // Pass the regenerateRota flag
       });
       console.log(`[handleGenerateWeeklyRota] Convex mutation call finished for startDate: ${selectedMonday}`);
     } finally {
@@ -391,207 +413,211 @@ export function RotaView() {
         <div className="mb-4">
           <h3 className="font-medium mb-2">Select Pharmacists and Working Days</h3>
           <div className="flex flex-col gap-2">
-            {[...pharmacists].filter((p: any) => p.isDefaultPharmacist).sort((a: any, b: any) => a.name.localeCompare(b.name)).map((pharmacist: any) => (
-              <div key={pharmacist._id} className="border rounded p-2 flex flex-col md:flex-row items-start md:items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedPharmacistIds.includes(pharmacist._id)}
-                    onChange={e => {
-                      setSelectedPharmacistIds((ids: Array<Id<"pharmacists">>) => {
-                        const checked = e.target.checked;
-                        // If selecting, also initialize working days if not already set
-                        if (checked && !ids.includes(pharmacist._id)) {
-                          if (!pharmacistWorkingDays[pharmacist._id]) {
-                            const newObj = { ...pharmacistWorkingDays };
-                            newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
-                            setPharmacistWorkingDaysLogged(newObj);
+            {[...pharmacists.filter((p: any) => p.isDefaultPharmacist),
+              ...pharmacists.filter((p: any) =>
+                !p.isDefaultPharmacist && selectedPharmacistIds.includes(p._id)
+              ),
+            ]
+              .sort((a: any, b: any) => a.name.localeCompare(b.name))
+              .map((pharmacist: any) => (
+                <div key={pharmacist._id} className="border rounded p-2 flex flex-col md:flex-row items-start md:items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedPharmacistIds.includes(pharmacist._id)}
+                      onChange={e => {
+                        setSelectedPharmacistIds((ids: Array<Id<"pharmacists">>) => {
+                          const checked = e.target.checked;
+                          if (checked && !ids.includes(pharmacist._id)) {
+                            if (!pharmacistWorkingDays[pharmacist._id]) {
+                              const newObj = { ...pharmacistWorkingDays };
+                              newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
+                              setPharmacistWorkingDaysLogged(newObj);
+                            }
+                            return [...ids, pharmacist._id];
                           }
-                          return [...ids, pharmacist._id];
-                        }
-                        // If unselecting, remove from working days
-                        if (!checked) {
-                          const newObj = { ...pharmacistWorkingDays };
-                          delete newObj[pharmacist._id];
-                          setPharmacistWorkingDaysLogged(newObj);
-                          return ids.filter(id => id !== pharmacist._id);
-                        }
-                        return ids;
-                      });
-                    }}
-                  />
-                  <span className="font-medium">{pharmacist.name}</span>
-                  {pharmacist.isDefaultPharmacist && (
-                    <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">Default</span>
+                          if (!checked) {
+                            const newObj = { ...pharmacistWorkingDays };
+                            delete newObj[pharmacist._id];
+                            setPharmacistWorkingDaysLogged(newObj);
+                            return ids.filter(id => id !== pharmacist._id);
+                          }
+                          return ids;
+                        });
+                      }}
+                    />
+                    <span className="font-medium">{pharmacist.name}</span>
+                    {pharmacist.isDefaultPharmacist && (
+                      <span className="ml-2 px-2 py-0.5 text-xs bg-blue-100 text-blue-700 rounded">Default</span>
+                    )}
+                  </div>
+                  {selectedPharmacistIds.includes(pharmacist._id) && (
+                    <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
+                      <div className="flex gap-2 items-center">
+                        <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
+                        {CLINIC_DAY_LABELS.map((day: string) => (
+                          <label key={day} className="flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
+                              onChange={e => {
+                                handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
+                              }}
+                            />
+                            <span className="text-xs">{day}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2 ml-4">
+                        <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
+                        <ul className="flex gap-2 mb-0">
+                          {getAllUnavailableRules(pharmacist).map((rule, idx) => (
+                            <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
+                              <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
+                              <button
+                                type="button"
+                                className="text-red-500 text-xs ml-1"
+                                onClick={() => {
+                                  if (idx < (pharmacist.notAvailableRules?.length || 0)) {
+                                    const updated = [...(pharmacist.notAvailableRules || [])];
+                                    updated.splice(idx, 1);
+                                    setRotaUnavailableRules(prev => ({
+                                      ...prev,
+                                      [pharmacist._id]: [
+                                        ...((prev[pharmacist._id] || [])),
+                                        ...updated.filter((_, i) => i !== idx)
+                                      ]
+                                    }));
+                                    pharmacist.notAvailableRules.splice(idx, 1);
+                                  } else {
+                                    removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
+                                  }
+                                }}
+                              >✕</button>
+                            </li>
+                          ))}
+                        </ul>
+                        <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
+                        <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
+                        <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
+                        <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
+                          const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
+                          const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
+                          const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
+                          addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
+                        }}>Add</button>
+                      </div>
+                    </div>
                   )}
                 </div>
-                {/* Only show working days if selected */}
-                {selectedPharmacistIds.includes(pharmacist._id) && (
-                  <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
-                    {/* Working days checkboxes */}
-                    <div className="flex gap-2 items-center">
-                      <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
-                      {CLINIC_DAY_LABELS.map((day: string) => (
-                        <label key={day} className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
-                            onChange={e => {
-                              handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
-                            }}
-                          />
-                          <span className="text-xs">{day}</span>
-                        </label>
-                      ))}
-                    </div>
-                    {/* Protected Rota Time (rota-specific unavailable rules UI) */}
-                    <div className="flex items-center gap-2 ml-4">
-                      <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
-                      <ul className="flex gap-2 mb-0">
-                        {getAllUnavailableRules(pharmacist).map((rule, idx) => (
-                          <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
-                            <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
-                            <button
-                              type="button"
-                              className="text-red-500 text-xs ml-1"
-                              onClick={() => {
-                                if (idx < (pharmacist.notAvailableRules?.length || 0)) {
-                                  // Remove permanent notAvailableRule for this session only
-                                  const updated = [...(pharmacist.notAvailableRules || [])];
-                                  updated.splice(idx, 1);
-                                  // Save the new set as rota-specific overrides
-                                  setRotaUnavailableRules(prev => ({
-                                    ...prev,
-                                    [pharmacist._id]: [
-                                      ...((prev[pharmacist._id] || [])),
-                                      // Add all permanent rules except the deleted one as rota-specific
-                                      ...updated.filter((_, i) => i !== idx)
-                                    ]
-                                  }));
-                                  // Also remove from permanent rules for this rota view
-                                  pharmacist.notAvailableRules.splice(idx, 1);
-                                } else {
-                                  // Remove rota-specific unavailable rule
-                                  removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
-                                }
-                              }}
-                            >✕</button>
-                          </li>
-                        ))}
-                      </ul>
-                      <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
-                      <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
-                      <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
-                      <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
-                        const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
-                        const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
-                        const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
-                        addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
-                      }}>Add</button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            ))}
-            {[...pharmacists].filter((p: any) => !p.isDefaultPharmacist).sort((a: any, b: any) => a.name.localeCompare(b.name)).map((pharmacist: any) => (
-              <div key={pharmacist._id} className="border rounded p-2 flex flex-col md:flex-row items-start md:items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={selectedPharmacistIds.includes(pharmacist._id)}
-                    onChange={e => {
-                      setSelectedPharmacistIds((ids: Array<Id<"pharmacists">>) => {
-                        const checked = e.target.checked;
-                        // If selecting, also initialize working days if not already set
-                        if (checked && !ids.includes(pharmacist._id)) {
-                          if (!pharmacistWorkingDays[pharmacist._id]) {
-                            const newObj = { ...pharmacistWorkingDays };
-                            newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
-                            setPharmacistWorkingDaysLogged(newObj);
+              ))}
+            {/* Pharmacist search bar for non-defaults */}
+            <div className="mb-3 flex items-center gap-2">
+              <input
+                type="text"
+                placeholder="Search non-default pharmacists..."
+                className="border rounded px-2 py-1 w-64"
+                value={pharmacistSearch}
+                onChange={e => setPharmacistSearch(e.target.value)}
+              />
+            </div>
+            {/* Non-default pharmacists, only show if search is active and not selected */}
+            {pharmacistSearch && ([...pharmacists]
+              .filter((p: any) => !p.isDefaultPharmacist &&
+                !selectedPharmacistIds.includes(p._id) &&
+                p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
+              )
+              .sort((a: any, b: any) => a.name.localeCompare(b.name))
+              .map((pharmacist: any) => (
+                <div key={pharmacist._id} className="border rounded p-2 flex flex-col md:flex-row items-start md:items-center gap-3">
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="checkbox"
+                      checked={selectedPharmacistIds.includes(pharmacist._id)}
+                      onChange={e => {
+                        setSelectedPharmacistIds((ids: Array<Id<"pharmacists">>) => {
+                          const checked = e.target.checked;
+                          if (checked && !ids.includes(pharmacist._id)) {
+                            if (!pharmacistWorkingDays[pharmacist._id]) {
+                              const newObj = { ...pharmacistWorkingDays };
+                              newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
+                              setPharmacistWorkingDaysLogged(newObj);
+                            }
+                            return [...ids, pharmacist._id];
                           }
-                          return [...ids, pharmacist._id];
-                        }
-                        // If unselecting, remove from working days
-                        if (!checked) {
-                          const newObj = { ...pharmacistWorkingDays };
-                          delete newObj[pharmacist._id];
-                          setPharmacistWorkingDaysLogged(newObj);
-                          return ids.filter(id => id !== pharmacist._id);
-                        }
-                        return ids;
-                      });
-                    }}
-                  />
-                  <span className="font-medium">{pharmacist.name}</span>
-                </div>
-                {/* Only show working days if selected */}
-                {selectedPharmacistIds.includes(pharmacist._id) && (
-                  <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
-                    {/* Working days checkboxes */}
-                    <div className="flex gap-2 items-center">
-                      <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
-                      {CLINIC_DAY_LABELS.map((day: string) => (
-                        <label key={day} className="flex items-center gap-1">
-                          <input
-                            type="checkbox"
-                            checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
-                            onChange={e => {
-                              handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
-                            }}
-                          />
-                          <span className="text-xs">{day}</span>
-                        </label>
-                      ))}
-                    </div>
-                    {/* Protected Rota Time (rota-specific unavailable rules UI) */}
-                    <div className="flex items-center gap-2 ml-4">
-                      <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
-                      <ul className="flex gap-2 mb-0">
-                        {getAllUnavailableRules(pharmacist).map((rule, idx) => (
-                          <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
-                            <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
-                            <button
-                              type="button"
-                              className="text-red-500 text-xs ml-1"
-                              onClick={() => {
-                                if (idx < (pharmacist.notAvailableRules?.length || 0)) {
-                                  // Remove permanent notAvailableRule for this session only
-                                  const updated = [...(pharmacist.notAvailableRules || [])];
-                                  updated.splice(idx, 1);
-                                  // Save the new set as rota-specific overrides
-                                  setRotaUnavailableRules(prev => ({
-                                    ...prev,
-                                    [pharmacist._id]: [
-                                      ...((prev[pharmacist._id] || [])),
-                                      // Add all permanent rules except the deleted one as rota-specific
-                                      ...updated.filter((_, i) => i !== idx)
-                                    ]
-                                  }));
-                                  // Also remove from permanent rules for this rota view
-                                  pharmacist.notAvailableRules.splice(idx, 1);
-                                } else {
-                                  // Remove rota-specific unavailable rule
-                                  removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
-                                }
-                              }}
-                            >✕</button>
-                          </li>
-                        ))}
-                      </ul>
-                      <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
-                      <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
-                      <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
-                      <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
-                        const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
-                        const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
-                        const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
-                        addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
-                      }}>Add</button>
-                    </div>
+                          if (!checked) {
+                            const newObj = { ...pharmacistWorkingDays };
+                            delete newObj[pharmacist._id];
+                            setPharmacistWorkingDaysLogged(newObj);
+                            return ids.filter(id => id !== pharmacist._id);
+                          }
+                          return ids;
+                        });
+                      }}
+                    />
+                    <span className="font-medium">{pharmacist.name}</span>
                   </div>
-                )}
-              </div>
-            ))}
+                  {selectedPharmacistIds.includes(pharmacist._id) && (
+                    <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
+                      <div className="flex gap-2 items-center">
+                        <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
+                        {CLINIC_DAY_LABELS.map((day: string) => (
+                          <label key={day} className="flex items-center gap-1">
+                            <input
+                              type="checkbox"
+                              checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
+                              onChange={e => {
+                                handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
+                              }}
+                            />
+                            <span className="text-xs">{day}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <div className="flex items-center gap-2 ml-4">
+                        <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
+                        <ul className="flex gap-2 mb-0">
+                          {getAllUnavailableRules(pharmacist).map((rule, idx) => (
+                            <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
+                              <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
+                              <button
+                                type="button"
+                                className="text-red-500 text-xs ml-1"
+                                onClick={() => {
+                                  if (idx < (pharmacist.notAvailableRules?.length || 0)) {
+                                    const updated = [...(pharmacist.notAvailableRules || [])];
+                                    updated.splice(idx, 1);
+                                    setRotaUnavailableRules(prev => ({
+                                      ...prev,
+                                      [pharmacist._id]: [
+                                        ...((prev[pharmacist._id] || [])),
+                                        ...updated.filter((_, i) => i !== idx)
+                                      ]
+                                    }));
+                                    pharmacist.notAvailableRules.splice(idx, 1);
+                                  } else {
+                                    removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
+                                  }
+                                }}
+                              >✕</button>
+                            </li>
+                          ))}
+                        </ul>
+                        <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
+                        <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
+                        <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
+                        <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
+                          const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
+                          const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
+                          const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
+                          addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
+                        }}>Add</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )))
+            }
           </div>
           <button
             className="mt-4 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
@@ -655,7 +681,7 @@ export function RotaView() {
                             // Set the state
                             setSinglePharmacistDispensaryDays(nextState);
                             // Immediately call regeneration with the calculated next state
-                            handleGenerateWeeklyRota(nextState);
+                            handleGenerateWeeklyRota(nextState, true);
                           }}
                         />
                         <div className={`w-10 h-5 bg-gray-200 rounded-full shadow-inner transition-colors ${singlePharmacistDispensaryDays.includes(isoDate) ? 'bg-blue-500' : ''}`}></div>
@@ -701,7 +727,12 @@ export function RotaView() {
                   <th className="border p-2 sticky left-0 bg-white z-10 border-b border-gray-200" colSpan={2} style={{ borderBottomWidth: 1 }}></th>
                   {[...Array(5)].flatMap((_, dayIdx: number) =>
                     TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => (
-                      <th key={dayIdx + '-' + slot.start + '-' + slot.end} className={`border p-2 bg-blue-50 text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}>{slot.start}-{slot.end}</th>
+                      <th key={dayIdx + '-' + slot.start + '-' + slot.end}
+                        className={`border p-2 bg-blue-50 text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
+                        style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                      >
+                        {slot.start}-{slot.end}
+                      </th>
                     ))
                   )}
                 </tr>
@@ -729,8 +760,8 @@ export function RotaView() {
                     });
                     return Array.from({ length: maxRows }, (_, rowIdx) => (
                       <tr key={`${ward.name}_row_${rowIdx}`} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
-                        <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]">{rowIdx === 0 ? ward.directorate : ''}</td>
-                        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]">{rowIdx === 0 ? ward.name : ''}</td>
+                        <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{rowIdx === 0 ? ward.directorate : ''}</td>
+                        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{rowIdx === 0 ? ward.name : ''}</td>
                         {todayDates.flatMap((isoDate, dayOffset) =>
                           TIME_SLOTS.map((slot, slotIdx) => {
                             const list = rotaAssignments.filter(a =>
@@ -742,7 +773,10 @@ export function RotaView() {
                             );
                             const a = list[rowIdx];
                             return (
-                              <td key={`${isoDate}${slot.start}${slot.end}${ward.name}${rowIdx}`} className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}>
+                              <td key={`${isoDate}${slot.start}${slot.end}${ward.name}${rowIdx}`}
+                                className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${a ? getPharmacistCellClass(a.pharmacistId) : ''}`}
+                                style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                              >
                                 {a ? getPharmacistName(a.pharmacistId) : ''}
                               </td>
                             );
@@ -753,8 +787,8 @@ export function RotaView() {
                   }
                   return [
                     <tr key={ward.directorate + ward.name} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
-                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]">{ward.directorate}</td>
-                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]">{ward.name}</td>
+                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{ward.directorate}</td>
+                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{ward.name}</td>
                       {[...Array(5)].flatMap((_, dayOffset: number) => {
                         const date = new Date(selectedMonday);
                         date.setDate(date.getDate() + dayOffset);
@@ -762,7 +796,10 @@ export function RotaView() {
                         return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
                           const assignment = getWardAssignment(isoDate, ward.name, slot);
                           return (
-                            <td key={isoDate + slot.start + slot.end + ward.name} className={`border p-1 text-center truncate max-w-[70px] text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}>
+                            <td key={isoDate + slot.start + slot.end + ward.name}
+                              className={`border p-1 text-center truncate max-w-[70px] text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
+                              style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                            >
                               {assignment ? getPharmacistName(assignment.pharmacistId) : ''}
                             </td>
                           );
@@ -772,7 +809,7 @@ export function RotaView() {
                   ];
                 })}
                 <tr>
-                  <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" colSpan={2}>Dispensary</td>
+                  <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" colSpan={2} style={{ borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -790,8 +827,8 @@ export function RotaView() {
                       return (
                         <td
                           key={isoDate + slot.start + slot.end + 'dispensary'}
-                          className={`border p-1 text-center max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`}
-                          style={{ borderBottomWidth: 1, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayName ? getPharmacistCellClass(assignment?.pharmacistId) : ''}`}
+                          style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
                         >
                           {displayName && (
                             isLunch ? (
@@ -815,9 +852,9 @@ export function RotaView() {
                   const clinicLabel = `${clinic.name} (Warfarin Clinic)`;
                   return (
                     <tr key={clinic._id}>
-                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]">{clinicLabel}</td>
-                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]">{clinic.name}</td>
-                      {[0,1,2,3,4].flatMap((dayOffset: number) => {
+                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{clinicLabel}</td>
+                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{clinic.name}</td>
+                      {[...Array(5)].flatMap((_, dayOffset: number) => {
                         const date = new Date(selectedMonday);
                         date.setDate(date.getDate() + dayOffset);
                         const isoDate = date.toISOString().split('T')[0];
@@ -834,14 +871,14 @@ export function RotaView() {
                             return (
                               <td
                                 key={isoDate + slot.start + slot.end + clinic._id}
-                                className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`}
-                                style={{ borderBottomWidth: 1 }}
+                                className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
+                                style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
                               >
                                 {assignment ? getPharmacistName(assignment.pharmacistId) : ""}
                               </td>
                             );
                           } else {
-                            return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`} style={{ borderBottomWidth: 1 }}></td>;
+                            return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}></td>;
                           }
                         });
                       })}
@@ -852,7 +889,7 @@ export function RotaView() {
               {/* --- Unavailable Pharmacists Row --- */}
               <tfoot>
                 <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10">Unavailable</td>
+                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -868,7 +905,7 @@ export function RotaView() {
                         );
                       });
                       return (
-                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center">
+                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
                           {unavailable.map((p: any) => p.name).join(', ') || ''}
                         </td>
                       );
@@ -877,7 +914,7 @@ export function RotaView() {
                 </tr>
                 {/* --- Management Time --- */}
                 <tr>
-                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2}>Management Time</td>
+                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2} style={{ borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -898,8 +935,8 @@ export function RotaView() {
                       return (
                         <td
                           key={isoDate + slot.start + slot.end + 'management'}
-                          className={`border p-1 text-center max-w-[70px] text-xs align-middle whitespace-normal bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} border-b border-gray-200`}
-                          style={{ borderBottomWidth: 1, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          className={`border p-1 text-center max-w-[70px] text-xs bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} 
+                          style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
                         >
                           {pharmacistNames.length > 0 ? (
                             <span>{pharmacistNames.join(", ")}</span>
