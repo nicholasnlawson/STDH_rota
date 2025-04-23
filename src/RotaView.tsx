@@ -871,10 +871,15 @@ export function RotaView() {
                             return (
                               <td
                                 key={isoDate + slot.start + slot.end + clinic._id}
-                                className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
-                                style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                                className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-100 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
+                                style={{ 
+                                  borderBottom: '1px solid #e5e7eb', 
+                                  borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined,
+                                  backgroundColor: assignment ? '#fef9c3' : '#fef9c3', // Maintain yellow background
+                                  color: '#000' // Always black text for clinics
+                                }}
                               >
-                                {assignment ? getPharmacistName(assignment.pharmacistId) : ""}
+                                {assignment ? <span style={{ color: 'black', fontWeight: 'bold' }}>{getPharmacistName(assignment.pharmacistId)}</span> : ""}
                               </td>
                             );
                           } else {

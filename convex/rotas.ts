@@ -788,8 +788,8 @@ export const generateRota = internalMutation({
             // Sort by duty count
             eligible = eligible.sort((a, b) => {
               if (!a || !b) return 0;
-              const aCount = args.dispensaryDutyCounts ? args.dispensaryDutyCounts[a._id] || 0 : 0;
-              const bCount = args.dispensaryDutyCounts ? args.dispensaryDutyCounts[b._id] || 0 : 0;
+              const aCount = args.dispensaryDutyCounts ? args.dispensaryDutyCounts[a._id as string] || 0 : 0;
+              const bCount = args.dispensaryDutyCounts ? args.dispensaryDutyCounts[b._id as string] || 0 : 0;
               return aCount - bCount;
             });
           }
@@ -838,95 +838,175 @@ export const generateRota = internalMutation({
         // Calculate how many shifts need to be assigned
         const totalShifts = regularDispensaryShifts.length;
         
-        // Band 6/7 preferred, Band 8 only if needed
-        let juniorPharmacists = pharmacists.filter(p => 
-          p && 
-          args.pharmacistIds.includes(p._id) && 
-          p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
-          (p.band === "6" || p.band === "7") // Band 6 and 7 pharmacists
-        );
-        
-        // Senior pharmacists (band 8a) are only used if needed
-        let seniorPharmacists = pharmacists.filter(p => 
-          p && 
-          args.pharmacistIds.includes(p._id) && 
-          p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
-          p.band === "8a" // Band 8a pharmacists
-        );
-        
-        let eligiblePharmacists: (Doc<"pharmacists"> | null)[] = [];
-        
-        // If junior pharmacists can cover all slots, use only them
-        if (juniorPharmacists.length >= totalShifts) {
-          eligiblePharmacists = [...juniorPharmacists];
-          console.log('[generateRota] Using only junior pharmacists (bands 6-7) for dispensary shifts');
-        } else {
-          // Otherwise, use all junior pharmacists and add enough senior pharmacists to cover remaining slots
-          eligiblePharmacists = [...juniorPharmacists, ...seniorPharmacists];
-          console.log('[generateRota] Using both junior and senior pharmacists for dispensary shifts');
-        }
-        
-        // Filter out pharmacists with a clinic conflict
-        eligiblePharmacists = eligiblePharmacists.filter(p =>
-          p && !regularDispensaryShifts.some(shift => 
-            hasClinicConflict(p._id, shift.start, shift.end, assignments) || 
-            isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end)
-          )
-        );
-        
-        // Exclude warfarin clinic pharmacists from dispensary shift eligibility
-        eligiblePharmacists = eligiblePharmacists.filter(p =>
-          p && !warfarinClinicPharmacists.has(p._id)
-        );
-        
-        // LOG: Eligible pharmacists for dispensary
-        console.log('[generateRota] Eligible pharmacists for dispensary:', eligiblePharmacists.map(p => p?.name || p?._id));
-        
-        // Shuffle within each group to ensure random selection among equals
-        eligiblePharmacists = shuffleArray(eligiblePharmacists);
-        
-        // Assign each shift to a unique pharmacist if possible
-        // First, try to assign all shifts with one pharmacist per shift
-        let remainingShifts = [...regularDispensaryShifts]; // Using only regular shifts, not lunch
-        while (remainingShifts.length > 0 && eligiblePharmacists.length > 0) {
-          // LOG: Start of shift assignment iteration
-          console.log('[generateRota] Remaining shifts:', remainingShifts);
-          // If we have enough pharmacists, assign each to only one shift
-          // Sort our pharmacists by how many shifts they already have
-          const shiftCounts: Record<string, number> = {};
-          assignments.forEach(a => {
-            shiftCounts[a.pharmacistId] = (shiftCounts[a.pharmacistId] || 0) + 1;
+        try {
+          // Band 6/7 preferred, Band 8 only if needed
+          let juniorPharmacists = pharmacists.filter(p => 
+            p && 
+            args.pharmacistIds.includes(p._id) && 
+            p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
+            (p.band === "6" || p.band === "7") // Band 6 and 7 pharmacists
+          );
+          
+          // Senior pharmacists (band 8a) are only used if needed
+          let seniorPharmacists = pharmacists.filter(p => 
+            p && 
+            args.pharmacistIds.includes(p._id) && 
+            p.band !== "EAU Practitioner" && // Exclude EAU Practitioner pharmacists
+            p.band === "8a" // Band 8a pharmacists
+          );
+          
+          console.log(`[generateRota] Found ${juniorPharmacists.length} junior pharmacists (band 6/7) and ${seniorPharmacists.length} senior pharmacists (band 8a) eligible for dispensary duty`);
+          
+          // Use dispensary duty counts from args to track weekly assignments
+          const dispensaryDutyCounts = args.dispensaryDutyCounts || {};
+          
+          // Log current weekly assignments
+          console.log('[generateRota] Current weekly dispensary duty counts:');
+          juniorPharmacists.forEach(p => {
+            if (p) console.log(`[generateRota] ${p.name}: ${dispensaryDutyCounts[p._id] || 0} shifts`);
           });
-          // LOG: Current shiftCounts
-          console.log('[generateRota] Current shiftCounts:', shiftCounts);
-          // Sort eligiblePharmacists by those with fewest assignments
-          const sortedPharmacists = [...eligiblePharmacists].sort((a, b) => {
-            // This guard should already handle nulls, but TS seems unsure
-            if (!a || !b) return 0;
-            const aCount = shiftCounts[a._id] || 0;
-            const bCount = shiftCounts[b._id] || 0;
-            return aCount - bCount;
+          seniorPharmacists.forEach(p => {
+            if (p) console.log(`[generateRota] ${p.name}: ${dispensaryDutyCounts[p._id] || 0} shifts`);
           });
-          console.log('[generateRota] Sorted pharmacists by fewest assignments:', sortedPharmacists.map(p => p?.name || p?._id));
-          if (sortedPharmacists.length === 0) break;
-          // Assign the next shift to the pharmacist with fewest assignments so far
-          const shift = remainingShifts.shift(); // Take the next shift
-          if (!shift) break;
-          const leastAssignedPharmacist = sortedPharmacists[0];
-          // Add null check before accessing properties
-          if (!leastAssignedPharmacist) continue; // Skip if no pharmacist found
-          assignments.push({ 
-            pharmacistId: leastAssignedPharmacist._id, 
+          
+          // Calculate if juniors have capacity for 2 shifts each per week
+          const workingDaysPerWeek = 5;
+          const totalWeeklyShifts = totalShifts * workingDaysPerWeek;
+          const maxJuniorCapacity = juniorPharmacists.length * 2; // 2 shifts per week max
+          
+          // Calculate how many shifts have been assigned to juniors so far
+          const juniorAssigned = juniorPharmacists.reduce((total, p) => 
+            p ? total + (dispensaryDutyCounts[p._id] || 0) : total, 0);
+          
+          // Determine if we need to involve senior pharmacists
+          let eligiblePharmacists: (Doc<"pharmacists"> | null)[] = [];
+          
+          if (juniorAssigned < maxJuniorCapacity) {
+            // Junior pharmacists haven't reached their weekly limit yet
+            eligiblePharmacists = [...juniorPharmacists];
+            console.log('[generateRota] Using only junior pharmacists (bands 6-7) for dispensary shifts - still below 2 shifts per week limit');
+          } else {
+            // Junior pharmacists have reached their weekly limit, include seniors
+            eligiblePharmacists = [...juniorPharmacists, ...seniorPharmacists];
+            console.log('[generateRota] Including senior pharmacists for dispensary shifts - juniors at capacity');
+          }
+          
+          // Filter out pharmacists with a clinic conflict
+          eligiblePharmacists = eligiblePharmacists.filter(p => {
+            if (!p) return false;
+            
+            const hasConflict = regularDispensaryShifts.some(shift => 
+              hasClinicConflict(p._id, shift.start, shift.end, assignments) || 
+              isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end)
+            );
+            
+            if (hasConflict) {
+              console.log(`[generateRota] Excluding ${p.name} from dispensary duty due to clinic conflict or unavailability`);
+              return false;
+            }
+            return true;
+          });
+          
+          // Exclude warfarin clinic pharmacists from dispensary shift eligibility
+          eligiblePharmacists = eligiblePharmacists.filter(p => {
+            if (!p) return false;
+            
+            const isWarfarinClinic = warfarinClinicPharmacists.has(p._id);
+            if (isWarfarinClinic) {
+              console.log(`[generateRota] Excluding ${p.name} from dispensary duty due to warfarin clinic assignment`);
+              return false;
+            }
+            return true;
+          });
+          
+          // Ensure we have enough eligible pharmacists
+          if (eligiblePharmacists.length === 0) {
+            console.log('[generateRota] ERROR: No eligible pharmacists for dispensary duty');
+            conflicts.push({
+              type: "dispensary",
+              description: "No eligible pharmacists available for dispensary shifts",
+              severity: "error"
+            });
+            return;
+          }
+          
+          // Track pharmacists who already have a dispensary shift today to enforce one-shift-per-day rule
+          const pharmacistsWithDispensaryShiftToday = new Set<string>();
+          
+          // Create a working copy of the weekly counts to update locally
+          const updatedDutyCounts = { ...dispensaryDutyCounts };
+          
+          // Assign each shift based on the weekly counts
+          let remainingShifts = [...regularDispensaryShifts];
+          while (remainingShifts.length > 0) {
+            // Find pharmacists who don't already have a shift today
+            let availablePharmacists = eligiblePharmacists.filter(p => 
+              p && !pharmacistsWithDispensaryShiftToday.has(p._id)
+            );
+            
+            // If all pharmacists have a shift today but we still have shifts to assign,
+            // we'll have to assign multiple shifts to some pharmacists
+            if (availablePharmacists.length === 0) {
+              console.log('[generateRota] WARNING: Not enough pharmacists for one-shift-per-day rule');
+              availablePharmacists = eligiblePharmacists;
+              
+              if (availablePharmacists.length === 0) {
+                console.log('[generateRota] ERROR: No pharmacists available for remaining shifts');
+                break;
+              }
+            }
+            
+            // Sort by weekly dispensary count (lowest first)
+            const sortedPharmacists = [...availablePharmacists].sort((a, b) => {
+              if (!a || !b) return 0;
+              const aCount = updatedDutyCounts[a._id] || 0;
+              const bCount = updatedDutyCounts[b._id] || 0;
+              return aCount - bCount;
+            });
+            
+            console.log('[generateRota] Pharmacists sorted by fewest weekly dispensary assignments:');
+            sortedPharmacists.forEach(p => {
+              if (p) console.log(`[generateRota] ${p.name}: ${updatedDutyCounts[p._id] || 0} shifts`);
+            });
+            
+            // Get the next shift and pharmacist
+            const shift = remainingShifts.shift();
+            if (!shift) break;
+            
+            const selectedPharmacist = sortedPharmacists[0];
+            if (!selectedPharmacist) continue;
+            
+            // Make the assignment
+            assignments.push({
+              pharmacistId: selectedPharmacist._id,
+              type: "dispensary",
+              location: "Dispensary",
+              startTime: shift.start,
+              endTime: shift.end
+            });
+            
+            // Update tracking
+            pharmacistsWithDispensaryShiftToday.add(selectedPharmacist._id);
+            updatedDutyCounts[selectedPharmacist._id] = (updatedDutyCounts[selectedPharmacist._id] || 0) + 1;
+            
+            console.log(`[generateRota] Assigned shift ${shift.start}-${shift.end} to ${selectedPharmacist.name} (Band ${selectedPharmacist.band}, Weekly total: ${updatedDutyCounts[selectedPharmacist._id]})`);
+          }
+        } catch (error) {
+          console.error(`[generateRota] ERROR in dispensary allocation:`, error);
+          conflicts.push({
             type: "dispensary",
-            location: "Dispensary",
-            startTime: shift.start,
-            endTime: shift.end
+            description: `Error assigning dispensary shifts: ${error}`,
+            severity: "error"
           });
-          // LOG: Assignment made
-          console.log('[generateRota] Assigned shift', shift, 'to', leastAssignedPharmacist.name || leastAssignedPharmacist._id);
         }
+        
         // LOG: Final shift assignments for this day
-        console.log('[generateRota] Final shift assignments:', assignments);
+        console.log('[generateRota] Final dispensary shift assignments:', 
+          assignments.filter(a => a.type === "dispensary").map(a => {
+            const pharmacist = pharmacists.find(p => p?._id === a.pharmacistId);
+            return `${pharmacist?.name || a.pharmacistId} (${a.startTime}-${a.endTime})`;
+          })
+        );
       }
     }
     
@@ -1112,6 +1192,12 @@ export const generateRota = internalMutation({
         }
       }
       
+      // Skip if pharmacist is not available
+      if (isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59")) {
+        console.log(`[generateRota] PASS 1: Skipping ${p.name} - not available on ${dayLabel}`);
+        return;
+      }
+      
       // Special handling for band 6 pharmacists - we should try to "bump" a band 7 from this directorate
       // to make room if possible
       if (!targetWard && p.band === "6") {
@@ -1157,7 +1243,7 @@ export const generateRota = internalMutation({
         if (band7PharmacistsInThisDir.length > 0) {
           // We found a band 7 pharmacist in this directorate who could be moved
           // Sort band 7 pharmacists by priority to move:
-          // 1. First move non-default pharmacists
+          // 1. First move non-default pharmacists over default ones
           // 2. Then move those not in their primary wards
           const sortedBand7PharmacistsToMove = [...band7PharmacistsInThisDir].sort((a, b) => {
             // First compare default status (non-default first)
@@ -1217,12 +1303,6 @@ export const generateRota = internalMutation({
       if (!targetWard) {
         console.log(`[generateRota] PASS 1: No available wards in ${p.primaryDirectorate} for ${p.name} - all already assigned`);
         return; // Skip this pharmacist if no ward available
-      }
-      
-      // Skip if pharmacist is not available
-      if (isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59")) {
-        console.log(`[generateRota] PASS 1: Skipping ${p.name} - not available on ${dayLabel}`);
-        return;
       }
       
       // Make the assignment
@@ -1451,7 +1531,7 @@ export const generateRota = internalMutation({
         
         if (candidates.length > 0) {
           const chosenPharmacist = candidates[0];
-          const targetWard = dirWards[0];
+          const targetWard = dirWards[0]; // Pick first ward in empty directorate
           
           assignments.push({
             pharmacistId: chosenPharmacist._id,
@@ -1565,7 +1645,6 @@ export const generateRota = internalMutation({
                 startTime: "00:00",
                 endTime: "23:59"
               });
-              console.log(`[generateRota] PASS 4.5: Assigned ${p.name} to ${w.name} in trained directorate ${dir}`);
               assigned = true;
               break;
             }
@@ -1586,7 +1665,6 @@ export const generateRota = internalMutation({
               startTime: "00:00",
               endTime: "23:59"
             });
-            console.log(`[generateRota] PASS 4.5: Assigned ${p.name} to ${w.name} (any available ward)`);
             assigned = true;
             break;
           }
