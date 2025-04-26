@@ -59,7 +59,12 @@ export function PharmacistList() {
 
   const [editingId, setEditingId] = useState<Id<"pharmacists"> | null>(null);
   const [editFormData, setEditFormData] = useState<PharmacistFormData | null>(null);
-
+  
+  // State for the all pharmacists modal
+  const [showAllPharmacistsModal, setShowAllPharmacistsModal] = useState(false);
+  // Track if we're editing inside the modal
+  const [editingInModal, setEditingInModal] = useState(false);
+  
   // Search state
   const [searchTerm, setSearchTerm] = useState("");
   const filteredPharmacists = pharmacists.filter(pharmacist =>
@@ -402,14 +407,29 @@ export function PharmacistList() {
 
       {/* Search Pharmacists */}
       <div className="mb-4">
-        <label className="block text-sm font-medium mb-1">Search Pharmacists</label>
-        <input
-          type="text"
-          placeholder="Type to search..."
-          value={searchTerm}
-          onChange={e => setSearchTerm(e.target.value)}
-          className="w-full rounded border-gray-300"
-        />
+        <div className="flex items-center gap-2 mb-2">
+          <input
+            type="text"
+            placeholder="Search pharmacists..."
+            className="border rounded px-2 py-1 w-64"
+            value={searchTerm}
+            onChange={e => setSearchTerm(e.target.value)}
+          />
+          {searchTerm && (
+            <button
+              className="text-gray-600 hover:text-gray-900"
+              onClick={() => setSearchTerm("")}
+            >
+              Clear
+            </button>
+          )}
+        </div>
+        <button
+          className="bg-blue-600 text-white px-3 py-1 text-sm rounded hover:bg-blue-700"
+          onClick={() => setShowAllPharmacistsModal(true)}
+        >
+          View All Pharmacists
+        </button>
       </div>
 
       {searchTerm && (
@@ -744,6 +764,389 @@ export function PharmacistList() {
               )}
             </div>
           ))}
+        </div>
+      )}
+      
+      {/* All Pharmacists Modal */}
+      {showAllPharmacistsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-lg shadow-lg p-6 w-full max-w-5xl max-h-[90vh] overflow-auto">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-bold">All Pharmacists</h3>
+              <button 
+                onClick={() => setShowAllPharmacistsModal(false)}
+                className="text-gray-600 hover:text-gray-900 text-2xl"
+              >
+                &times;
+              </button>
+            </div>
+            
+            <div className="grid grid-cols-1 gap-6">
+              {/* Show edit form if we're editing in the modal */}
+              {editingInModal && editingId && editFormData && (
+                <div className="border rounded-lg p-4 bg-white mb-6">
+                  <div className="flex justify-between items-center mb-4">
+                    <h4 className="text-lg font-bold">Edit Pharmacist</h4>
+                    <button 
+                      onClick={() => {
+                        setEditingId(null);
+                        setEditFormData(null);
+                        setEditingInModal(false);
+                      }}
+                      className="text-gray-600 hover:text-gray-900 text-2xl"
+                    >
+                      &times;
+                    </button>
+                  </div>
+                  
+                  <form onSubmit={async (e) => {
+                    e.preventDefault();
+                    await handleEditSubmit(e);
+                    setEditingInModal(false);
+                  }} className="space-y-4">
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Name</label>
+                        <input
+                          type="text"
+                          value={editFormData.name}
+                          onChange={e => setEditFormData(f => f && { ...f, name: e.target.value })}
+                          className="w-full rounded border border-gray-300 px-2 py-1"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Email</label>
+                        <input
+                          type="email"
+                          value={editFormData.email}
+                          onChange={e => setEditFormData(f => f && { ...f, email: e.target.value })}
+                          className="w-full rounded border border-gray-300 px-2 py-1"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Band</label>
+                        <select
+                          value={editFormData.band}
+                          onChange={e => {
+                            const band = e.target.value;
+                            setEditFormData(f => f && ({ ...f, band,
+                              ...(band === 'Dispensary Pharmacist' || band === 'EAU Practitioner' ? {
+                                warfarinTrained: false,
+                                specialistTraining: [],
+                                isDefaultPharmacist: false,
+                                isAdmin: false,
+                                trainedDirectorates: [],
+                                primaryDirectorate: '',
+                                primaryWards: [],
+                                preferences: [],
+                                availability: [],
+                              } : {})
+                            }));
+                          }}
+                          className="w-full rounded border border-gray-300 px-2 py-1"
+                          required
+                        >
+                          {["6", "7", "8a", "Dispensary Pharmacist", "EAU Practitioner"].map(band => (
+                            <option key={band} value={band}>{band}</option>
+                          ))}
+                        </select>
+                      </div>
+                      
+                      {/* Only show Trained in Directorates if not Dispensary or Practitioner */}
+                      {!(editFormData.band === "Dispensary Pharmacist" || editFormData.band === "EAU Practitioner") && (
+                        <div>
+                          <label className="block text-sm font-medium mb-1">Trained in Directorates <span className="text-xs text-gray-400">(optional)</span></label>
+                          <div className="flex flex-col space-y-1">
+                            {Array.isArray(directorates) && directorates.length > 0 ? (
+                              directorates.map(d => (
+                                <label key={d._id || d.name} className="flex items-center space-x-2">
+                                  <input
+                                    type="checkbox"
+                                    checked={editFormData.trainedDirectorates.includes(d.name)}
+                                    onChange={e => {
+                                      setEditFormData(f => {
+                                        if (!f) return f;
+                                        const updated = e.target.checked
+                                          ? [...f.trainedDirectorates, d.name]
+                                          : f.trainedDirectorates.filter(name => name !== d.name);
+                                        return { ...f, trainedDirectorates: updated };
+                                      });
+                                    }}
+                                  />
+                                  <span className="text-sm">{d.name}</span>
+                                </label>
+                              ))
+                            ) : (
+                              <span className="text-gray-500 text-sm">No directorates available yet. You can add these later in Ward Requirements.</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Default Working Days</label>
+                      <div className="flex gap-2 flex-wrap">
+                        {["Monday","Tuesday","Wednesday","Thursday","Friday"].map(day => (
+                          <label key={day} className="flex items-center space-x-1">
+                            <input
+                              type="checkbox"
+                              checked={editFormData.workingDays.includes(day)}
+                              onChange={e => {
+                                setEditFormData(f => {
+                                  if (!f) return f;
+                                  const updated = e.target.checked
+                                    ? [...f.workingDays, day]
+                                    : f.workingDays.filter(d => d !== day);
+                                  return { ...f, workingDays: updated };
+                                });
+                              }}
+                            />
+                            <span className="text-sm">{day}</span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+
+                    {!(["Dispensary Pharmacist", "EAU Practitioner"].includes(editFormData.band)) && (
+                      <>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-sm font-medium mb-1">Primary Directorate <span className="text-xs text-gray-400">(optional)</span></label>
+                            <select
+                              value={editFormData.primaryDirectorate}
+                              onChange={e => setEditFormData(f => f && { ...f, primaryDirectorate: e.target.value, primaryWards: [] })}
+                              className="w-full rounded border border-gray-300 px-2 py-1"
+                            >
+                              <option value="">Select...</option>
+                              {Array.isArray(directorates) && directorates.length > 0 && directorates.map(d => (
+                                <option key={d._id || d.name} value={d.name}>{d.name}</option>
+                              ))}
+                            </select>
+                          </div>
+                          
+                          {editFormData.primaryDirectorate && (
+                            <div>
+                              <label className="block text-sm font-medium mb-1">Primary Ward(s) <span className="text-xs text-gray-400">(optional)</span></label>
+                              <div className="flex flex-col space-y-1">
+                                {(Array.isArray(directorates) && directorates.find(d => d.name === editFormData.primaryDirectorate)?.wards || []).map(ward => (
+                                  <label key={ward.name} className="flex items-center space-x-2">
+                                    <input
+                                      type="checkbox"
+                                      checked={editFormData.primaryWards.includes(ward.name)}
+                                      onChange={e => {
+                                        setEditFormData(f => {
+                                          if (!f) return f;
+                                          const updated = e.target.checked
+                                            ? [...f.primaryWards, ward.name]
+                                            : f.primaryWards.filter(name => name !== ward.name);
+                                          return { ...f, primaryWards: updated };
+                                        });
+                                      }}
+                                    />
+                                    <span className="text-sm">{ward.name}</span>
+                                  </label>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div>
+                            <label className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                checked={editFormData.warfarinTrained}
+                                onChange={e => setEditFormData(f => f && { ...f, warfarinTrained: e.target.checked })}
+                              />
+                              <span className="text-sm font-medium">Warfarin Trained</span>
+                            </label>
+                          </div>
+                          <div>
+                            <label className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                checked={editFormData.isDefaultPharmacist}
+                                onChange={e => setEditFormData(f => f && { ...f, isDefaultPharmacist: e.target.checked })}
+                              />
+                              <span className="text-sm font-medium">Default Pharmacist</span>
+                            </label>
+                          </div>
+                          <div>
+                            <label className="flex items-center space-x-2">
+                              <input
+                                type="checkbox"
+                                checked={editFormData.isAdmin}
+                                onChange={e => setEditFormData(f => f && { ...f, isAdmin: e.target.checked })}
+                              />
+                              <span className="text-sm font-medium">Admin Access</span>
+                            </label>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                    
+                    <div className="flex gap-4 mt-4">
+                      <button
+                        type="submit"
+                        className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700"
+                      >
+                        Save Changes
+                      </button>
+                      <button
+                        type="button"
+                        className="bg-gray-400 text-white px-4 py-2 rounded hover:bg-gray-500"
+                        onClick={() => {
+                          setEditingId(null);
+                          setEditFormData(null);
+                          setEditingInModal(false);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              )}
+
+              {/* Only show the pharmacist list if we're not currently editing */}
+              {!editingInModal && pharmacists.sort((a, b) => a.name.localeCompare(b.name)).map(pharmacist => (
+                <div key={pharmacist._id} className="border rounded-lg p-4 bg-gray-50">
+                  <div className="flex justify-between items-start mb-2">
+                    <div>
+                      <h4 className="text-lg font-bold">{pharmacist.name}</h4>
+                      <p className="text-gray-600">{pharmacist.email}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`px-2 py-1 rounded text-xs ${
+                        pharmacist.band === '8a' ? 'bg-green-700 text-white' : 
+                        pharmacist.band === '7' ? 'bg-green-500 text-white' : 
+                        pharmacist.band === '6' ? 'bg-green-100 text-green-800' :
+                        pharmacist.band === 'Dispensary Pharmacist' ? 'bg-purple-100 text-purple-800 border border-purple-300' :
+                        pharmacist.band === 'EAU Practitioner' ? 'bg-blue-900 text-white border border-blue-900' :
+                        'bg-gray-100 text-gray-800'
+                      }`}>
+                        {['6', '7', '8a'].includes(pharmacist.band) ? `Band ${pharmacist.band}` : pharmacist.band}
+                      </span>
+                      {pharmacist.isDefaultPharmacist && (
+                        <span className="bg-blue-100 text-blue-800 px-2 py-1 rounded text-xs">Default</span>
+                      )}
+                      {pharmacist.isAdmin && (
+                        <span className="bg-yellow-100 text-yellow-800 px-2 py-1 rounded text-xs">Admin</span>
+                      )}
+                      <button
+                        className="ml-2 bg-blue-600 hover:bg-blue-700 text-white text-xs px-2 py-1 rounded"
+                        onClick={() => {
+                          handleEditClick(pharmacist);
+                          setEditingInModal(true);
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="bg-red-600 hover:bg-red-700 text-white text-xs px-2 py-1 rounded"
+                        onClick={async () => {
+                          if (window.confirm(`Are you sure you want to remove ${pharmacist.name}?`)) {
+                            await removePharmacist({ id: pharmacist._id });
+                          }
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-4 mt-3">
+                    {pharmacist.primaryDirectorate && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Primary Directorate</h5>
+                        <p>{pharmacist.primaryDirectorate}</p>
+                      </div>
+                    )}
+                    
+                    {Array.isArray(pharmacist.primaryWards) && pharmacist.primaryWards.length > 0 && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Primary Ward(s)</h5>
+                        <p>{pharmacist.primaryWards.join(", ")}</p>
+                      </div>
+                    )}
+                    
+                    {Array.isArray(pharmacist.trainedDirectorates) && pharmacist.trainedDirectorates.length > 0 && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Trained Directorates</h5>
+                        <p>{pharmacist.trainedDirectorates.join(", ")}</p>
+                      </div>
+                    )}
+                    
+                    {Array.isArray(pharmacist.specialistTraining) && pharmacist.specialistTraining.length > 0 && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Specialist Training</h5>
+                        <div className="flex flex-wrap gap-1">
+                          {pharmacist.specialistTraining.map(training => (
+                            <span key={training} className="bg-gray-200 px-2 py-0.5 rounded-full text-xs">
+                              {training}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {pharmacist.warfarinTrained && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Special Training</h5>
+                        <span className="bg-green-100 text-green-800 px-2 py-0.5 rounded-full text-xs">Warfarin</span>
+                      </div>
+                    )}
+                    
+                    {Array.isArray(pharmacist.workingDays) && pharmacist.workingDays.length > 0 && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Working Days</h5>
+                        <div className="flex gap-1">
+                          {["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].map(day => (
+                            <span 
+                              key={day} 
+                              className={`px-2 py-0.5 rounded-full text-xs ${
+                                pharmacist.workingDays && pharmacist.workingDays.includes(day) 
+                                  ? 'bg-blue-100 text-blue-800' 
+                                  : 'bg-gray-100 text-gray-400'
+                              }`}
+                            >
+                              {day.substring(0, 3)}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    
+                    {Array.isArray(pharmacist.notAvailableRules) && pharmacist.notAvailableRules.length > 0 && (
+                      <div>
+                        <h5 className="text-sm font-semibold">Not Available</h5>
+                        <div className="flex flex-wrap gap-1">
+                          {pharmacist.notAvailableRules.map((rule, idx) => (
+                            <span key={idx} className="bg-red-50 text-red-700 px-2 py-0.5 rounded text-xs">
+                              {rule.dayOfWeek} {rule.startTime}-{rule.endTime}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            
+            <div className="flex justify-end mt-6">
+              <button 
+                onClick={() => setShowAllPharmacistsModal(false)}
+                className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700"
+              >
+                Close
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

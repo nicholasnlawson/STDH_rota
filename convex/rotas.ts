@@ -218,10 +218,14 @@ export const generateRota = internalMutation({
           
           // STRATEGY 2: Try to find any warfarin-trained Band 6/7 pharmacist with ZERO clinics
           if (!assigned) {
+            // Get multi-ward pharmacists to exclude them from clinic assignments
+            const multiWardPharmacists = getMultiWardPharmacists(assignments);
+            
             const band67Pharmacists = workingPharmacists.filter(p => 
               p && 
               (p.band === "6" || p.band === "7") && 
-              p.warfarinTrained
+              p.warfarinTrained &&
+              !multiWardPharmacists.has(p._id) // Exclude pharmacists covering multiple wards
             );
             
             // Sort band 6/7 pharmacists by how many clinics they've already been assigned to this week
@@ -245,7 +249,7 @@ export const generateRota = internalMutation({
               } : null).filter(Boolean)
             );
             
-            // Check time conflicts for each clinic assignment
+            // Check for time conflicts
             const assignedPharmacistsByTime: Record<string, string[]> = {};
             
             // Get all assigned pharmacists for the current day with their time slots
@@ -302,10 +306,14 @@ export const generateRota = internalMutation({
           
           // STRATEGY 3: Try to find any warfarin-trained Band 8a pharmacist with lowest clinic count
           if (!assigned) {
+            // Get multi-ward pharmacists to exclude them from clinic assignments
+            const multiWardPharmacists = getMultiWardPharmacists(assignments);
+            
             const band8aPharmacists = workingPharmacists.filter(p => 
               p && 
               p.band === "8a" && 
-              p.warfarinTrained
+              p.warfarinTrained &&
+              !multiWardPharmacists.has(p._id) // Exclude pharmacists covering multiple wards
             );
             
             // Sort band 8a pharmacists by how many clinics they've already been assigned to this week
@@ -440,12 +448,37 @@ export const generateRota = internalMutation({
           
           // STRATEGY 4: Try to find band 6/7 pharmacists who already have 1+ clinics
           if (!assigned) {
+            // Get multi-ward pharmacists to exclude them from clinic assignments
+            const multiWardPharmacists = getMultiWardPharmacists(assignments);
+            
             // Get band 6/7 pharmacists who have at least 1 clinic already
             const band67PharmacistsWithClinics = workingPharmacists.filter(p => 
               p && 
               (p.band === "6" || p.band === "7") && 
               p.warfarinTrained && 
-              (weeklyClinicCounts[p._id] || 0) > 0
+              (weeklyClinicCounts[p._id] || 0) > 0 &&
+              !multiWardPharmacists.has(p._id) // Exclude pharmacists covering multiple wards
+            );
+            
+            // Sort band 6/7 pharmacists by how many clinics they've already been assigned to this week
+            const sortedBand67Pharmacists = [...band67PharmacistsWithClinics].sort((a, b) => {
+              if (!a || !b) return 0;
+              const countA = weeklyClinicCounts[a._id] || 0;
+              const countB = weeklyClinicCounts[b._id] || 0;
+              return countA - countB;
+            });
+            
+            console.log(`[generateRota] STRATEGY 4: Found ${band67PharmacistsWithClinics.length} warfarin-trained band 6/7 pharmacists:`, 
+              band67PharmacistsWithClinics.map(p => p ? { name: p.name, band: p.band, warfarinTrained: p.warfarinTrained } : null).filter(Boolean)
+            );
+            
+            terminalLog(`STRATEGY 4: Found ${band67PharmacistsWithClinics.length} warfarin-trained band 6/7 pharmacists, sorted by weekly clinic load:`, 
+              sortedBand67Pharmacists.map(p => p ? { 
+                name: p.name, 
+                band: p.band, 
+                warfarinTrained: p.warfarinTrained,
+                weeklyClinicCount: weeklyClinicCounts[p._id] || 0
+              } : null).filter(Boolean)
             );
             
             // Check for time conflicts
@@ -462,34 +495,20 @@ export const generateRota = internalMutation({
             });
             
             // Filter out pharmacists who have already been assigned to a conflicting time slot
-            const availableBand67WithClinics = band67PharmacistsWithClinics.filter(p => {
+            const availableBand67Pharmacists = sortedBand67Pharmacists.filter(p => {
               if (!p) return false;
               
               // Check if this pharmacist is already assigned to a clinic at this time
               const timeKey = `${clinic.startTime}-${clinic.endTime}`;
               return !assignedPharmacistsByTime[timeKey]?.includes(p._id) && !isPharmacistNotAvailable(p, dayLabel, clinic.startTime, clinic.endTime);
-            }).sort((a, b) => {
-              if (!a || !b) return 0;
-              const countA = weeklyClinicCounts[a._id] || 0;
-              const countB = weeklyClinicCounts[b._id] || 0;
-              return countA - countB;
             });
             
-            terminalLog(`STRATEGY 4: Checking band 6/7 pharmacists who already have clinics:`, 
-              availableBand67WithClinics.map(p => p ? { 
-                name: p.name, 
-                band: p.band, 
-                warfarinTrained: p.warfarinTrained,
-                weeklyClinicCount: weeklyClinicCounts[p._id] || 0
-              } : null).filter(Boolean)
-            );
-            
-            if (availableBand67WithClinics.length > 0) {
-              const pharmacist = availableBand67WithClinics[0];
+            if (availableBand67Pharmacists.length > 0) {
+              const pharmacist = availableBand67Pharmacists[0];
               if (pharmacist) {
-                console.log(`[generateRota] SUCCESS: Assigned band 6/7 pharmacist ${pharmacist.name} (already has ${weeklyClinicCounts[pharmacist._id] || 0} clinic(s)) to clinic ${clinic.name}`);
+                console.log(`[generateRota] SUCCESS: Assigned band 6/7 pharmacist ${pharmacist.name} to clinic ${clinic.name}`);
                 
-                terminalLog(`SUCCESS! Assigned band 6/7 pharmacist ${pharmacist.name} (already has ${weeklyClinicCounts[pharmacist._id] || 0} clinic(s)) to clinic ${clinic.name}`);
+                terminalLog(`SUCCESS! Assigned band 6/7 pharmacist ${pharmacist.name} to clinic ${clinic.name}`);
                 
                 assignments.push({
                   pharmacistId: pharmacist._id,
@@ -506,10 +525,14 @@ export const generateRota = internalMutation({
           
           // STRATEGY 5: As a last resort - any band 6/7 pharmacist regardless of clinic count
           if (!assigned) {
+            // Get multi-ward pharmacists to exclude them from clinic assignments
+            const multiWardPharmacists = getMultiWardPharmacists(assignments);
+            
             const band67Pharmacists = workingPharmacists.filter(p => 
               p && 
               (p.band === "6" || p.band === "7") && 
-              p.warfarinTrained
+              p.warfarinTrained &&
+              !multiWardPharmacists.has(p._id) // Exclude pharmacists covering multiple wards
             );
             
             // Sort band 6/7 pharmacists by how many clinics they've already been assigned to this week
@@ -572,6 +595,133 @@ export const generateRota = internalMutation({
                 
                 assigned = true;
               }
+            }
+          }
+          
+          // STRATEGY 6: If still not assigned and all pharmacists are covering multiple wards, try to reassign ward coverage
+          if (!assigned) {
+            console.log(`[generateRota] STRATEGY 6: No pharmacists available for clinic ${clinic.name}, checking if lack of availability is due to multi-ward coverage`);
+            
+            // Get all warfarin-trained pharmacists, including those covering multiple wards
+            const allWarfarinTrainedPharmacists = workingPharmacists.filter(p => 
+              p && 
+              p.warfarinTrained &&
+              !isPharmacistNotAvailable(p, dayLabel, clinic.startTime, clinic.endTime)
+            );
+            
+            // Get multi-ward pharmacists
+            const multiWardPharmacists = getMultiWardPharmacists(assignments);
+            
+            // Check if multi-ward pharmacists exist and are warfarin trained
+            const multiWardWarfarinPharmacists = allWarfarinTrainedPharmacists.filter(p => 
+              p && multiWardPharmacists.has(p._id)
+            );
+            
+            if (multiWardWarfarinPharmacists.length > 0) {
+              console.log(`[generateRota] STRATEGY 6: Found ${multiWardWarfarinPharmacists.length} warfarin-trained pharmacists covering multiple wards`);
+              
+              // Sort by band preference (6, 7, then 8a)
+              const sortedMultiWardPharmacists = [...multiWardWarfarinPharmacists].sort((a, b) => {
+                if (!a || !b) return 0;
+                
+                // Prefer band 6, then 7, then 8a
+                const bandOrder: Record<string, number> = { "6": 0, "7": 1, "8a": 2 };
+                const aBand = a.band || '';
+                const bBand = b.band || '';
+                
+                return (bandOrder[aBand] || 999) - (bandOrder[bBand] || 999);
+              });
+              
+              // Find a non-multi-ward pharmacist who isn't warfarin trained to take over one of their wards
+              const bestMultiWardPharmacist = sortedMultiWardPharmacists[0];
+              
+              if (bestMultiWardPharmacist) {
+                // Find which wards this pharmacist is covering
+                const coveredWards: string[] = [];
+                
+                assignments.forEach(a => {
+                  if (a.type === "ward" && a.pharmacistId === bestMultiWardPharmacist._id) {
+                    coveredWards.push(a.location);
+                  }
+                });
+                
+                console.log(`[generateRota] STRATEGY 6: ${bestMultiWardPharmacist.name} is covering multiple wards: ${coveredWards.join(', ')}`);
+                
+                // Find pharmacists not assigned to any wards but are available
+                const availablePharmacists = pharmacists.filter(p => 
+                  p && 
+                  args.pharmacistIds.includes(p._id) &&
+                  p.band !== "EAU Practitioner" &&
+                  p.band !== "Dispensary Pharmacist" &&
+                  !assignments.some(a => a.pharmacistId === p._id && (a.type === "ward" || a.type === "clinic")) &&
+                  !isPharmacistNotAvailable(p, dayLabel, "09:00", "17:00")
+                );
+                
+                if (availablePharmacists.length > 0) {
+                  // Pick one of the covered wards to reassign (preferably the ward they're not primarily responsible for)
+                  let wardToReassign = coveredWards[0];
+                  
+                  // If they have multiple wards, try to find one that's not their primary ward
+                  if (coveredWards.length > 1 && bestMultiWardPharmacist.primaryWards) {
+                    const nonPrimaryWards = coveredWards.filter(w => !bestMultiWardPharmacist.primaryWards?.includes(w));
+                    if (nonPrimaryWards.length > 0) {
+                      wardToReassign = nonPrimaryWards[0];
+                    }
+                  }
+                  
+                  // Get a replacement pharmacist
+                  const replacementPharmacist = availablePharmacists[0];
+                  
+                  console.log(`[generateRota] STRATEGY 6: Reassigning ward ${wardToReassign} from ${bestMultiWardPharmacist.name} to ${replacementPharmacist?.name || "unknown"}`);
+                  
+                  // Remove the ward assignment from the multi-ward pharmacist
+                  const assignmentIndex = assignments.findIndex(a => 
+                    a.type === "ward" && 
+                    a.location === wardToReassign && 
+                    a.pharmacistId === bestMultiWardPharmacist._id
+                  );
+                  
+                  if (assignmentIndex !== -1 && replacementPharmacist) {
+                    assignments.splice(assignmentIndex, 1);
+                    
+                    // Assign the ward to the replacement pharmacist
+                    assignments.push({
+                      pharmacistId: replacementPharmacist._id,
+                      type: "ward",
+                      location: wardToReassign,
+                      startTime: "00:00",
+                      endTime: "23:59"
+                    });
+                    
+                    // Now assign the clinic to the multi-ward pharmacist
+                    assignments.push({
+                      pharmacistId: bestMultiWardPharmacist._id,
+                      type: "clinic",
+                      location: clinic.name,
+                      startTime: clinic.startTime,
+                      endTime: clinic.endTime
+                    });
+                    
+                    console.log(`[generateRota] STRATEGY 6: SUCCESS! Reassigned ward ${wardToReassign} to ${replacementPharmacist?.name || "unknown"} and assigned ${bestMultiWardPharmacist.name} to clinic ${clinic.name}`);
+                    
+                    assigned = true;
+                  }
+                } else {
+                  console.log(`[generateRota] STRATEGY 6: No available pharmacists to take over ward duties`);
+                }
+              }
+            } else {
+              console.log(`[generateRota] STRATEGY 6: No warfarin-trained pharmacists covering multiple wards`);
+            }
+            
+            // If still not assigned, record it as a conflict
+            if (!assigned) {
+              console.log(`[generateRota] WARNING: Unable to assign any pharmacist to clinic ${clinic.name}`);
+              conflicts.push({
+                type: "clinic",
+                description: `No eligible pharmacists available for clinic ${clinic.name}`,
+                severity: "warning"
+              });
             }
           }
           
@@ -715,7 +865,8 @@ export const generateRota = internalMutation({
             !dispensaryShifts.some(shift => 
               hasClinicConflict(p._id, shift.start, shift.end, assignments) || 
               isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end)
-            )
+            ) &&
+            !isSolePharmacistInAnyDirectorate(p._id)
           );
           
           // If no band 6, try band 7
@@ -729,7 +880,8 @@ export const generateRota = internalMutation({
               !dispensaryShifts.some(shift => 
                 hasClinicConflict(p._id, shift.start, shift.end, assignments) || 
                 isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end)
-              )
+              ) &&
+              !isSolePharmacistInAnyDirectorate(p._id)
             );
           }
           
@@ -744,7 +896,8 @@ export const generateRota = internalMutation({
               !dispensaryShifts.some(shift => 
                 hasClinicConflict(p._id, shift.start, shift.end, assignments) || 
                 isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end)
-              )
+              ) &&
+              !isSolePharmacistInAnyDirectorate(p._id)
             );
           }
           
@@ -854,7 +1007,9 @@ export const generateRota = internalMutation({
             !pharmacistsWithDispensaryShiftToday.has(p._id) && // Enforce one dispensary shift per day
             !warfarinClinicPharmacists.has(p._id) && // Exclude pharmacists with warfarin clinics today
             !hasClinicConflict(p._id, shift.start, shift.end, assignments) && // No clinic conflicts
-            !isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end) // Available at this time
+            !isPharmacistNotAvailable(p, dayLabel, shift.start, shift.end) && // Available at this time
+            !getMultiWardPharmacists(assignments).has(p._id) && // Exclude pharmacists covering multiple wards
+            !isSolePharmacistInAnyDirectorate(p._id)
           );
           
           if (eligiblePharmacists.length === 0) {
@@ -989,7 +1144,8 @@ export const generateRota = internalMutation({
 
     // Pool pharmacists eligible for ward duties (exclude dispensary & EAU Practitioner)
     let wardPharmacists = pharmacists.filter(p =>
-      p && p.band !== "Dispensary Pharmacist" && p.band !== "EAU Practitioner"
+      p && 
+      p.band !== "Dispensary Pharmacist" && p.band !== "EAU Practitioner"
       // Exclude pharmacists assigned to full-day dispensary shifts
       && !fullDayDispensaryPharmacists.has(p._id)
     ) as NonNullable<typeof pharmacists[0]>[];
@@ -1017,7 +1173,7 @@ export const generateRota = internalMutation({
     console.log('[generateRota] PASS 1: Starting primary directorate/ward assignment');
     
     // Group wards by directorate for easier access
-    const wardsByDirectorate: Record<string, any[]> = {};
+    const wardsByDirectorate: Record<string, typeof activeWards[number][]> = {};
     activeWards.forEach(w => {
       if (!wardsByDirectorate[w.directorate]) {
         wardsByDirectorate[w.directorate] = [];
@@ -1115,7 +1271,7 @@ export const generateRota = internalMutation({
         interface PharmacistAssignment {
           assignment: Assignment;
           pharmacist: NonNullable<typeof pharmacists[0]>;
-          ward: any;
+          ward: typeof activeWards[number];
           isPrimaryWard: boolean;
           isDefault: boolean;
         }
@@ -1125,7 +1281,7 @@ export const generateRota = internalMutation({
            .map(a => {
              const ward = activeWards.find(w => w.name === a.location);
              if (ward && ward.directorate === directorate) {
-               const pharmacist = pharmacists.find(ph => ph && ph._id === a.pharmacistId);
+               const pharmacist = pharmacists.find(p => p && p._id === a.pharmacistId);
                if (pharmacist && pharmacist.band === "7") {
                  // Check if this is a primary ward for the pharmacist
                  const isPrimaryWard = pharmacist.primaryWards?.includes(ward.name) || false;
@@ -1252,54 +1408,331 @@ export const generateRota = internalMutation({
       const dirWards = wardsByDirectorate[directorate] || [];
       if (dirWards.length === 0) continue;
       
-      // Try to assign at least one pharmacist to this empty directorate
-      const candidates = wardPharmacists
-        .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
-        .filter(p => p.band !== "8a" || p.primaryDirectorate === directorate)
+      console.log(`[generateRota] PASS 2: Directorate ${directorate} has no pharmacists assigned. Attempting to fill...`);
+      
+      // Get ALL working pharmacists for the day - this is different from previous version
+      // that only looked at unassigned pharmacists
+      const allWorkingPharmacists = getWorkingPharmacistsForDay(pharmacists, args, dayOfWeek)
+        .filter((p): p is NonNullable<typeof pharmacists[0]> => 
+          p !== null && !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59")
+        );
+      
+      // STRATEGY 1: First try band 6 pharmacists trained in that directorate
+      const band6TrainedCandidates = allWorkingPharmacists
+        .filter(p => p && p.band === "6" && (p.trainedDirectorates || []).includes(directorate))
         .sort((a, b) => {
-          // First prioritize non-default pharmacists over default ones
-          const aIsDefault = a.isDefaultPharmacist ? 10 : 0;
-          const bIsDefault = b.isDefaultPharmacist ? 10 : 0;
-          const defaultDiff = aIsDefault - bIsDefault;
+          // First prioritize those not already assigned
+          const aAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === a._id);
+          const bAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === b._id);
+          if (aAssigned !== bAssigned) {
+            return aAssigned ? 1 : -1; // Prefer unassigned first
+          }
           
-          // If default status differences exist, prioritize by that
-          if (defaultDiff !== 0) return defaultDiff;
+          // Check if either is assigned to their primary directorate
+          const aAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === a._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === a.primaryDirectorate;
+            }
+            return false;
+          });
           
-          // First prioritize band 7 pharmacists over band 6 for being moved outside primary directorate
-          const aIsBand7 = a.band === "7" ? -5 : 0;
-          const bIsBand7 = b.band === "7" ? -5 : 0;
-          const bandDiff = aIsBand7 - bIsBand7;
+          const bAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === b._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === b.primaryDirectorate;
+            }
+            return false;
+          });
           
-          // If band differences exist, prioritize by that
-          if (bandDiff !== 0) return bandDiff;
+          // If one is assigned to primary and one isn't, prioritize moving the one not assigned to primary
+          if (aAssignedToPrimary !== bAssignedToPrimary) {
+            return aAssignedToPrimary ? 1 : -1; // Prefer not to move those in primary directorate
+          }
           
-          // Prefer pharmacists trained in this directorate
-          const aTrainedInDir = a.trainedDirectorates?.includes(directorate) ? -10 : 0;
-          const bTrainedInDir = b.trainedDirectorates?.includes(directorate) ? -10 : 0;
-          return (aTrainedInDir - bTrainedInDir);
+          // Then consider if either is a default pharmacist
+          const aIsDefault = a.isDefaultPharmacist ? 1 : 0;
+          const bIsDefault = b.isDefaultPharmacist ? 1 : 0;
+          
+          // If one is default and one isn't, prioritize moving the non-default
+          if (aIsDefault !== bIsDefault) {
+            return aIsDefault - bIsDefault; // Lower number gets picked first, so prefer non-default
+          }
+          
+          // Then prioritize those trained in the target directorate
+          const aTrainedInDir = (a.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          const bTrainedInDir = (b.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          return aTrainedInDir - bTrainedInDir;
         });
       
-      console.log(`[generateRota] PASS 2: Candidates for empty directorate ${directorate} prioritizing non-default and band 7 over default and band 6:`, 
-        candidates.map(p => `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, Band ${p.band}${p.trainedDirectorates?.includes(directorate) ? ', trained' : ''})`));
+      console.log(`[generateRota] PASS 2: Found ${band6TrainedCandidates.length} band 6 pharmacists trained in ${directorate}:`, 
+        band6TrainedCandidates.map(p => {
+          const isAssigned = assignments.some(a => a.type === "ward" && a.pharmacistId === p._id);
+          const isInPrimary = isAssigned && assignments.some(a => {
+            if (a.type === "ward" && a.pharmacistId === p._id) {
+              const ward = activeWards.find(w => w.name === a.location);
+              return ward && ward.directorate === p.primaryDirectorate;
+            }
+            return false;
+          });
+          return `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, ${isAssigned ? (isInPrimary ? 'in primary directorate' : 'assigned elsewhere') : 'unassigned'})`;
+        }));
       
-      if (candidates.length > 0) {
-        const chosenPharmacist = candidates[0];
+      // STRATEGY 2: If no band 6 trained, try band 7 pharmacists trained in that directorate
+      const band7TrainedCandidates = allWorkingPharmacists
+        .filter(p => p && p.band === "7" && (p.trainedDirectorates || []).includes(directorate))
+        .sort((a, b) => {
+          // First prioritize those not already assigned
+          const aAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === a._id);
+          const bAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === b._id);
+          if (aAssigned !== bAssigned) {
+            return aAssigned ? 1 : -1; // Prefer unassigned first
+          }
+          
+          // Check if either is assigned to their primary directorate
+          const aAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === a._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === a.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          const bAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === b._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === b.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          // If one is assigned to primary and one isn't, prioritize moving the one not assigned to primary
+          if (aAssignedToPrimary !== bAssignedToPrimary) {
+            return aAssignedToPrimary ? 1 : -1; // Prefer not to move those in primary directorate
+          }
+          
+          // Then consider if either is a default pharmacist
+          const aIsDefault = a.isDefaultPharmacist ? 1 : 0;
+          const bIsDefault = b.isDefaultPharmacist ? 1 : 0;
+          
+          // If one is default and one isn't, prioritize moving the non-default
+          if (aIsDefault !== bIsDefault) {
+            return aIsDefault - bIsDefault; // Lower number gets picked first, so prefer non-default
+          }
+          
+          // Then prioritize those trained in the target directorate
+          const aTrainedInDir = (a.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          const bTrainedInDir = (b.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          return aTrainedInDir - bTrainedInDir;
+        });
+      
+      console.log(`[generateRota] PASS 2: Found ${band7TrainedCandidates.length} band 7 pharmacists trained in ${directorate}:`, 
+        band7TrainedCandidates.map(p => {
+          const isAssigned = assignments.some(a => a.type === "ward" && a.pharmacistId === p._id);
+          const isInPrimary = isAssigned && assignments.some(a => {
+            if (a.type === "ward" && a.pharmacistId === p._id) {
+              const ward = activeWards.find(w => w.name === a.location);
+              return ward && ward.directorate === p.primaryDirectorate;
+            }
+            return false;
+          });
+          return `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, ${isAssigned ? (isInPrimary ? 'in primary directorate' : 'assigned elsewhere') : 'unassigned'})`;
+        }));
+      
+      // STRATEGY 3: If no trained band 6/7, try any band 7
+      const band7Candidates = allWorkingPharmacists
+        .filter(p => p && p.band === "7")
+        .sort((a, b) => {
+          // First prioritize those not already assigned
+          const aAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === a._id);
+          const bAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === b._id);
+          if (aAssigned !== bAssigned) {
+            return aAssigned ? 1 : -1; // Prefer unassigned first
+          }
+          
+          // Check if either is assigned to their primary directorate
+          const aAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === a._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === a.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          const bAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === b._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === b.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          // If one is assigned to primary and one isn't, prioritize moving the one not assigned to primary
+          if (aAssignedToPrimary !== bAssignedToPrimary) {
+            return aAssignedToPrimary ? 1 : -1; // Prefer not to move those in primary directorate
+          }
+          
+          // Then consider if either is a default pharmacist
+          const aIsDefault = a.isDefaultPharmacist ? 1 : 0;
+          const bIsDefault = b.isDefaultPharmacist ? 1 : 0;
+          
+          // If one is default and one isn't, prioritize moving the non-default
+          if (aIsDefault !== bIsDefault) {
+            return aIsDefault - bIsDefault; // Lower number gets picked first, so prefer non-default
+          }
+          
+          // Then prioritize those trained in the target directorate
+          const aTrainedInDir = (a.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          const bTrainedInDir = (b.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          return aTrainedInDir - bTrainedInDir;
+        });
+      
+      console.log(`[generateRota] PASS 2: Found ${band7Candidates.length} band 7 pharmacists that could be moved to ${directorate}:`, 
+        band7Candidates.map(p => `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, ${assignments.some(a => a.type === "ward" && a.pharmacistId === p._id) ? 'already assigned' : 'unassigned'})`));
+      
+      // STRATEGY 4: Last resort, try band 8a pharmacists
+      const band8aCandidates = allWorkingPharmacists
+        .filter(p => p && p.band === "8a")
+        .sort((a, b) => {
+          // First prioritize those not already assigned
+          const aAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === a._id);
+          const bAssigned = assignments.some(asn => asn.type === "ward" && asn.pharmacistId === b._id);
+          if (aAssigned !== bAssigned) {
+            return aAssigned ? 1 : -1; // Prefer unassigned first
+          }
+          
+          // Check if either is assigned to their primary directorate
+          const aAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === a._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === a.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          const bAssignedToPrimary = assignments.some(asn => {
+            if (asn.type === "ward" && asn.pharmacistId === b._id) {
+              const ward = activeWards.find(w => w.name === asn.location);
+              return ward && ward.directorate === b.primaryDirectorate;
+            }
+            return false;
+          });
+          
+          // If one is assigned to primary and one isn't, prioritize moving the one not assigned to primary
+          if (aAssignedToPrimary !== bAssignedToPrimary) {
+            return aAssignedToPrimary ? 1 : -1; // Prefer not to move those in primary directorate
+          }
+          
+          // Check if the target directorate is the pharmacist's primary directorate
+          const aIsPrimaryDirectorate = a.primaryDirectorate === directorate;
+          const bIsPrimaryDirectorate = b.primaryDirectorate === directorate;
+          
+          // If one's primary directorate is the target and the other's isn't, prioritize the one whose primary it is
+          if (aIsPrimaryDirectorate !== bIsPrimaryDirectorate) {
+            return aIsPrimaryDirectorate ? -1 : 1; // Prefer to assign to their primary directorate
+          }
+          
+          // Then consider if either is a default pharmacist
+          const aIsDefault = a.isDefaultPharmacist ? 1 : 0;
+          const bIsDefault = b.isDefaultPharmacist ? 1 : 0;
+          
+          // If one is default and one isn't, prioritize keeping default pharmacists in positions
+          if (aIsDefault !== bIsDefault) {
+            return bIsDefault - aIsDefault; // Higher number (default=1) gets picked first
+          }
+          
+          // Then prioritize those trained in the target directorate
+          const aTrainedInDir = (a.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          const bTrainedInDir = (b.trainedDirectorates || []).includes(directorate) ? -1 : 0;
+          return aTrainedInDir - bTrainedInDir;
+        });
+      
+      console.log(`[generateRota] PASS 2: Found ${band8aCandidates.length} band 8a pharmacists that could be moved to ${directorate}:`, 
+        band8aCandidates.map(p => {
+          const isAssigned = assignments.some(a => a.type === "ward" && a.pharmacistId === p._id);
+          const isInPrimary = isAssigned && assignments.some(a => {
+            if (a.type === "ward" && a.pharmacistId === p._id) {
+              const ward = activeWards.find(w => w.name === a.location);
+              return ward && ward.directorate === p.primaryDirectorate;
+            }
+            return false;
+          });
+          const isPrimaryDirectorate = p.primaryDirectorate === directorate;
+          return `${p.name} (${p.isDefaultPharmacist ? 'DEFAULT' : 'non-default'}, ${isPrimaryDirectorate ? 'primary directorate' : 'not primary'}, ${isAssigned ? (isInPrimary ? 'in primary directorate' : 'assigned elsewhere') : 'unassigned'})`;
+        }));
+      
+      // Combine and prioritize all candidates
+      const allCandidates = [
+        ...band6TrainedCandidates, // First priority: Band 6 trained in directorate
+        ...band7TrainedCandidates, // Second priority: Band 7 trained in directorate
+        ...band7Candidates.filter(p => !band7TrainedCandidates.some(tp => tp._id === p._id)), // Third: Band 7 not trained
+        ...band8aCandidates // Last priority: Band 8a
+      ];
+      
+      if (allCandidates.length > 0) {
+        const chosenPharmacist = allCandidates[0];
         const targetWard = dirWards[0]; // Pick first ward in empty directorate
+        const targetWardName = targetWard.name;
         
-        // Make assignment
+        // Check if pharmacist is already assigned to a ward
+        const existingAssignment = assignments.find(a => 
+          a.type === "ward" && a.pharmacistId === chosenPharmacist._id);
+        
+        if (existingAssignment) {
+          // Remove existing assignment
+          const currentWard = activeWards.find(w => w.name === existingAssignment.location);
+          const fromDirectorate = currentWard ? currentWard.directorate : "unknown";
+          
+          console.log(`[generateRota] PASS 2: Moving ${chosenPharmacist.name} from ${existingAssignment.location} (${fromDirectorate}) to ${targetWardName} (${directorate})`);
+          
+          // Remove the existing assignment
+          const existingIdx = assignments.findIndex(a => 
+            a.type === existingAssignment.type && 
+            a.location === existingAssignment.location && 
+            a.pharmacistId === existingAssignment.pharmacistId
+          );
+          
+          if (existingIdx !== -1) {
+            assignments.splice(existingIdx, 1);
+          }
+          
+          // If this was the only pharmacist in that directorate, mark it as unfilled
+          if (fromDirectorate !== "unknown") {
+            const directorateStillHasPharmacist = assignments.some(a => {
+              if (a.type === "ward" && a.pharmacistId === chosenPharmacist._id) {
+                const ward = activeWards.find(w => w.name === a.location);
+                return ward && ward.directorate === fromDirectorate;
+              }
+              return false;
+            });
+            
+            if (!directorateStillHasPharmacist) {
+              directoratesFilled[fromDirectorate] = false;
+              console.log(`[generateRota] PASS 2: Directorate ${fromDirectorate} now has no pharmacists and will be processed again`);
+            }
+          }
+        }
+        
+        // Make the new assignment
         assignments.push({
           pharmacistId: chosenPharmacist._id,
           type: "ward",
-          location: targetWard.name,
+          location: targetWardName,
           startTime: "00:00",
           endTime: "23:59"
         });
         
-        // Remove pharmacist from pool
-        wardPharmacists = wardPharmacists.filter(p => p._id !== chosenPharmacist._id);
+        console.log(`[generateRota] PASS 2: Assigned ${chosenPharmacist.name} (band ${chosenPharmacist.band}${(chosenPharmacist.trainedDirectorates || []).includes(directorate) ? ', trained' : ''}) to ${targetWardName} in empty directorate ${directorate}`);
         
         // Mark directorate as filled
         directoratesFilled[directorate] = true;
+      } else {
+        console.log(`[generateRota] PASS 2: WARNING - No suitable pharmacists found for empty directorate ${directorate}`);
+        conflicts.push({
+          type: "emptyDirectorate",
+          description: `Directorate ${directorate} has no available pharmacists to assign`,
+          severity: "warning"
+        });
       }
     }
     
@@ -1318,7 +1751,6 @@ export const generateRota = internalMutation({
           if (pharmacist.band === "EAU Practitioner") {
             // EAU Practitioners count as 0.5
             assignedCount += 0.5;
-            console.log(`[generateRota] PASS 3: Counting EAU Practitioner ${pharmacist.name} as 0.5 for ward ${w.name}`);
           } else {
             // Regular pharmacists count as 1
             assignedCount += 1;
@@ -1422,8 +1854,8 @@ export const generateRota = internalMutation({
           .filter(p => !isPharmacistNotAvailable(p, dayLabel, "00:00", "23:59"))
           .filter(p => p.band !== "8a" || p.primaryDirectorate === directorate)
           .sort((a, b) => {
-            const aTrainedInDir = a.trainedDirectorates?.includes(directorate) ? -10 : 0;
-            const bTrainedInDir = b.trainedDirectorates?.includes(directorate) ? -10 : 0;
+            const aTrainedInDir = (a.trainedDirectorates || []).includes(directorate) ? -10 : 0;
+            const bTrainedInDir = (b.trainedDirectorates || []).includes(directorate) ? -10 : 0;
             return (aTrainedInDir - bTrainedInDir);
           });
         
@@ -1508,19 +1940,26 @@ export const generateRota = internalMutation({
           
           // If we couldn't assign the 8a in their primary directorate, assign to Management Time
           if (!assigned) {
-            console.log(`[generateRota] PASS 4.5: No available wards for Band 8a ${p.name} in primary directorate ${p.primaryDirectorate} - assigning to Management Time`);
-            
-            // Assign to Management Time instead
-            assignments.push({
-              pharmacistId: p._id,
-              type: "management",
-              location: "Management Time",
-              startTime: "00:00",
-              endTime: "23:59"
-            });
-            
-            assigned = true;
-            console.log(`[generateRota] PASS 4.5: Assigned Band 8a ${p.name} to Management Time`);
+            // Only assign default pharmacists to Management Time
+            if (p.isDefaultPharmacist) {
+              console.log(`[generateRota] PASS 4.5: No available wards in ${p.primaryDirectorate} for Band 8a ${p.name} - assigning to Management Time`);
+              
+              // Assign to Management Time instead
+              assignments.push({
+                pharmacistId: p._id,
+                type: "management",
+                location: "Management Time",
+                startTime: "00:00",
+                endTime: "23:59"
+              });
+              
+              assigned = true;
+              console.log(`[generateRota] PASS 4.5: Assigned DEFAULT Band 8a ${p.name} to Management Time`);
+            } else {
+              console.log(`[generateRota] PASS 4.5: No available wards in ${p.primaryDirectorate} for NON-DEFAULT Band 8a ${p.name} - will remain unassigned`);
+              // Non-default pharmacists just remain unassigned
+              assigned = true; // Mark as handled to avoid further processing
+            }
           }
           
           // Remove from pool regardless of assignment - we don't want 8a's assigned elsewhere
@@ -1599,9 +2038,14 @@ export const generateRota = internalMutation({
       
       // Sort wards by preference (primary wards first, then others)
       const sortedWards = [...dirWards].sort((a, b) => {
-        const aIsPrimary = p.primaryWards?.includes(a.name) ? -10 : 0;
-        const bIsPrimary = p.primaryWards?.includes(b.name) ? -10 : 0;
-        return aIsPrimary - bIsPrimary;
+        // Check if pharmacist is trained in either directorate
+        const aIsPrimary = p.primaryWards?.includes(a.name);
+        const bIsPrimary = p.primaryWards?.includes(b.name);
+        
+        if (aIsPrimary && !bIsPrimary) return -1; // Prefer primary wards
+        if (!aIsPrimary && bIsPrimary) return 1;
+        
+        return 0;
       });
       
       // Assign to first preferred ward that's below ideal count
@@ -1665,6 +2109,758 @@ export const generateRota = internalMutation({
 
     console.log(`[generateRota] PASS 6: Completed. ${wardPharmacists.length} pharmacists remaining unassigned`);
 
+    // --- PASS 7: UTILIZE MANAGEMENT TIME PHARMACISTS FOR UNCOVERED WARDS ---
+    console.log(`[generateRota] PASS 7: Starting - Checking for management time pharmacists to cover empty wards`);
+    
+    // Step 1: Identify all uncovered wards
+    const coveredWardNames = new Set(
+      assignments
+        .filter(a => a.type === "ward")
+        .map(a => a.location)
+    );
+
+    // Get all active wards
+    const allWards = activeWards.map(w => w.name);
+
+    // Find uncovered wards
+    const uncoveredWards = allWards.filter(w => !coveredWardNames.has(w));
+
+    console.log(`[generateRota] PASS 7: Found ${uncoveredWards.length} uncovered wards:`, 
+      uncoveredWards.map(w => `${w} (${activeWards.find(ward => ward.name === w)?.directorate || 'unknown'})`));
+    
+    if (uncoveredWards.length > 0) {
+      // Step 2: Find pharmacists on management time
+      const managementAssignments = assignments.filter(a => a.type === "management");
+      
+      console.log(`[generateRota] PASS 7: Found ${managementAssignments.length} pharmacists on management time`);
+      
+      // Process each management assignment if there are uncovered wards
+      for (const mgmtAssignment of managementAssignments) {
+        // Skip if no more uncovered wards
+        if (uncoveredWards.length === 0) break;
+        
+        const managementPharmacist = pharmacists.find(p => p && p._id === mgmtAssignment.pharmacistId);
+        if (!managementPharmacist) continue;
+        
+        console.log(`[generateRota] PASS 7: Processing ${managementPharmacist.name} on management time`);
+        
+        // Skip non-default pharmacists for PASS 7 - they should not be able to displace others
+        if (!managementPharmacist.isDefaultPharmacist) {
+          console.log(`[generateRota] PASS 7: Skipping ${managementPharmacist.name} - non-default pharmacists should not displace others`);
+          continue;
+        }
+        
+        // Step 3: Find a ward in the management pharmacist's primary directorate
+        const primaryDirectorate = managementPharmacist.primaryDirectorate;
+        
+        let targetWard = null;
+        let existingAssignment = null;
+        let displacedPharmacist = null;
+        
+        // Try to find their primary ward first
+        if (Array.isArray(managementPharmacist.primaryWards) && managementPharmacist.primaryWards.length > 0) {
+          for (const primaryWardName of managementPharmacist.primaryWards) {
+            // Find the assignment for this ward
+            const wardAssignment = assignments.find(a => 
+              a.type === "ward" && a.location === primaryWardName
+            );
+            
+            if (wardAssignment) {
+              // This ward is already assigned to someone - we'll displace them
+              const potentialDisplaced = pharmacists.find(p => p && p._id === wardAssignment.pharmacistId);
+              
+              // Check if the currently assigned pharmacist is a default pharmacist in their primary ward
+              // If so, don't displace them
+              if (potentialDisplaced && potentialDisplaced.isDefaultPharmacist && 
+                  potentialDisplaced.primaryWards && potentialDisplaced.primaryWards.includes(primaryWardName)) {
+                console.log(`[generateRota] PASS 7: Cannot displace ${potentialDisplaced.name} from ${primaryWardName} - they are a DEFAULT pharmacist in their primary ward`);
+                continue;
+              }
+              
+              existingAssignment = wardAssignment;
+              displacedPharmacist = potentialDisplaced;
+              targetWard = activeWards.find(w => w.name === primaryWardName);
+              
+              console.log(`[generateRota] PASS 7: Found primary ward ${primaryWardName} of ${managementPharmacist.name}, currently assigned to ${displacedPharmacist?.name || 'unknown'}`);
+              break;
+            } else {
+              // This ward isn't assigned - easy case, no displacement needed
+              targetWard = activeWards.find(w => w.name === primaryWardName);
+              if (targetWard) {
+                console.log(`[generateRota] PASS 7: Assigning ${managementPharmacist.name} to unassigned primary ward ${primaryWardName}`);
+                break;
+              }
+            }
+          }
+        }
+        
+        // If no primary ward found, find any ward in their primary directorate
+        if (!targetWard && primaryDirectorate) {
+          const directorateWards = activeWards.filter(w => w.directorate === primaryDirectorate);
+          
+          // First look for an unassigned ward in this directorate
+          const unassignedDirectorateWard = directorateWards.find(w => !coveredWardNames.has(w.name));
+          if (unassignedDirectorateWard) {
+            targetWard = unassignedDirectorateWard;
+            console.log(`[generateRota] PASS 7: Found unassigned ward ${targetWard.name} in ${managementPharmacist.name}'s primary directorate ${primaryDirectorate}`);
+          } else {
+            // Find a ward in the directorate that's already assigned to someone
+            const wardAssignment = assignments.find(a => {
+              if (a.type !== "ward") return false;
+              const ward = activeWards.find(w => w.name === a.location);
+              return ward && ward.directorate === primaryDirectorate;
+            });
+            
+            if (wardAssignment) {
+              const potentialDisplaced = pharmacists.find(p => p && p._id === wardAssignment.pharmacistId);
+              
+              // Don't displace default pharmacists from their primary ward/directorate
+              if (potentialDisplaced && potentialDisplaced.isDefaultPharmacist) {
+                const isPrimaryWard = potentialDisplaced.primaryWards && 
+                                     potentialDisplaced.primaryWards.includes(wardAssignment.location);
+                const isPrimaryDirectorate = potentialDisplaced.primaryDirectorate === primaryDirectorate;
+                
+                if (isPrimaryWard || isPrimaryDirectorate) {
+                  console.log(`[generateRota] PASS 7: Cannot displace DEFAULT pharmacist ${potentialDisplaced.name} from ${wardAssignment.location} - it's their ${isPrimaryWard ? 'primary ward' : 'primary directorate'}`);
+                  continue;
+                }
+              }
+              
+              existingAssignment = wardAssignment;
+              displacedPharmacist = potentialDisplaced;
+              targetWard = activeWards.find(w => w.name === wardAssignment.location);
+              
+              console.log(`[generateRota] PASS 7: Found ward ${targetWard?.name || wardAssignment.location} in ${managementPharmacist.name}'s primary directorate ${primaryDirectorate}, currently assigned to ${displacedPharmacist?.name || 'unknown'}`);
+            }
+          }
+        }
+        
+        // If we found a target ward, make the reassignment
+        if (targetWard) {
+          // Remove the management assignment
+          const mgmtIndex = assignments.findIndex(a => 
+            a.type === "management" && a.pharmacistId === managementPharmacist._id
+          );
+          
+          if (mgmtIndex !== -1) {
+            assignments.splice(mgmtIndex, 1);
+            
+            // If there's an existing assignment for this ward, remove it
+            if (existingAssignment) {
+              const existingIndex = assignments.findIndex(a => 
+                a.type === existingAssignment.type && 
+                a.location === existingAssignment.location && 
+                a.pharmacistId === existingAssignment.pharmacistId
+              );
+              
+              if (existingIndex !== -1) {
+                assignments.splice(existingIndex, 1);
+              }
+            }
+            
+            // Assign the management pharmacist to the target ward
+            assignments.push({
+              pharmacistId: managementPharmacist._id,
+              type: "ward",
+              location: targetWard.name,
+              startTime: "00:00",
+              endTime: "23:59"
+            });
+            
+            console.log(`[generateRota] PASS 7: Assigned ${managementPharmacist.name} to ward ${targetWard.name} (${targetWard.directorate})`);
+            
+            // Remove this ward from uncovered if it was uncovered
+            const uncoveredIndex = uncoveredWards.findIndex(w => w === targetWard.name);
+            if (uncoveredIndex !== -1) {
+              uncoveredWards.splice(uncoveredIndex, 1);
+            }
+            
+            // Update covered wards set
+            coveredWardNames.add(targetWard.name);
+            
+            // If there was a displaced pharmacist, try to assign them to an uncovered ward
+            if (displacedPharmacist) {
+              // Sort uncovered wards by match score for the displaced pharmacist
+              const sortedWards = [...uncoveredWards].sort((a, b) => {
+                // Check if pharmacist is trained in either directorate
+                const aIsTrained = (displacedPharmacist.trainedDirectorates || []).includes(activeWards.find(w => w.name === a)?.directorate || '');
+                const bIsTrained = (displacedPharmacist.trainedDirectorates || []).includes(activeWards.find(w => w.name === b)?.directorate || '');
+                
+                if (aIsTrained && !bIsTrained) return -1; // Prefer trained directorate
+                if (!aIsTrained && bIsTrained) return 1;
+                
+                return 0;
+              });
+              
+              if (sortedWards.length > 0) {
+                const bestMatchWard = sortedWards[0];
+                
+                // Assign the displaced pharmacist to the best matching uncovered ward
+                assignments.push({
+                  pharmacistId: displacedPharmacist._id,
+                  type: "ward",
+                  location: bestMatchWard,
+                  startTime: "00:00",
+                  endTime: "23:59"
+                });
+                
+                console.log(`[generateRota] PASS 7: Reassigned displaced pharmacist ${displacedPharmacist.name} to uncovered ward ${bestMatchWard} (${activeWards.find(w => w.name === bestMatchWard)?.directorate || 'unknown'})`);
+                
+                // Update the uncovered wards list
+                const wardIndex = uncoveredWards.findIndex(w => w === bestMatchWard);
+                if (wardIndex !== -1) {
+                  uncoveredWards.splice(wardIndex, 1);
+                }
+                
+                // Update the covered wards set
+                coveredWardNames.add(bestMatchWard);
+              } else {
+                console.log(`[generateRota] PASS 7: No uncovered wards left for displaced pharmacist ${displacedPharmacist.name}`);
+              }
+            }
+          } else {
+            console.log(`[generateRota] PASS 7: Could not find a suitable ward in primary directorate for ${managementPharmacist.name}`);
+          }
+        } else {
+          console.log(`[generateRota] PASS 7: Could not find a suitable ward in primary directorate for ${managementPharmacist.name}`);
+        }
+      }
+    }
+    
+    console.log(`[generateRota] PASS 7: Completed. ${uncoveredWards.length} wards remain uncovered`);
+
+    // --- PASS 8: BALANCE DIRECTORATE COVERAGE FOR MULTIPLE UNCOVERED WARDS ---
+    console.log(`[generateRota] PASS 8: Starting - Balancing pharmacist allocation for directorates with multiple uncovered wards`);
+    
+    // Skip this pass if no uncovered wards
+    if (uncoveredWards.length > 0) {
+      // Keep track of how many pharmacists have been moved in this pass
+      let pharmacistsMoved = 0;
+      
+      // Continue moving pharmacists until either no more deficient directorates or we've moved enough pharmacists
+      const MAX_PHARMACISTS_TO_MOVE = 3; // Set a maximum to avoid emptying directorates
+      
+      while (pharmacistsMoved < MAX_PHARMACISTS_TO_MOVE) {
+        // Group uncovered wards by directorate
+        const uncoveredByDirectorate: Record<string, typeof activeWards[number][]> = {};
+        
+        for (const ward of uncoveredWards) {
+          if (!ward) continue;
+          
+          const wardObject = activeWards.find(w => w.name === ward);
+          if (!wardObject || !wardObject.directorate) continue;
+          
+          if (!uncoveredByDirectorate[wardObject.directorate]) {
+            uncoveredByDirectorate[wardObject.directorate] = [];
+          }
+          uncoveredByDirectorate[wardObject.directorate].push(wardObject);
+        }
+        
+        // Find directorates with multiple uncovered wards
+        const deficientDirectorates = Object.entries(uncoveredByDirectorate)
+          .filter(([_, wards]) => wards.length > 1)
+          .sort(([_, wardsA], [__, wardsB]) => wardsB.length - wardsA.length); // Sort by most uncovered wards first
+        
+        // If no more deficient directorates, we're done
+        if (deficientDirectorates.length === 0) {
+          console.log(`[generateRota] PASS 8: No more directorates with multiple uncovered wards. Stopping after moving ${pharmacistsMoved} pharmacists.`);
+          break;
+        }
+        
+        console.log(`[generateRota] PASS 8: Found ${deficientDirectorates.length} directorates with multiple uncovered wards:`, 
+          deficientDirectorates.map(([dir, wards]) => `${dir} (${wards.length} wards)`));
+        
+        // Find directorates with full allocation (all wards covered)
+        const fullyAllocatedDirectorates = new Set<string>();
+        
+        // Get all active directorates
+        const allDirectorates = new Set(activeWards.map(w => w.directorate).filter(Boolean) as string[]);
+        
+        // Check each directorate to see if all its wards are covered
+        for (const directorate of allDirectorates) {
+          const dirWards = activeWards.filter(w => w.directorate === directorate);
+          const coveredDirWards = dirWards.filter(w => coveredWardNames.has(w.name));
+          
+          // Only consider directorates with more than one pharmacist to avoid emptying them
+          const pharmacistsInDirectorate = new Set(
+            assignments
+              .filter(a => a.type === "ward")
+              .filter(a => {
+                const ward = activeWards.find(w => w.name === a.location);
+                return ward && ward.directorate === directorate;
+              })
+              .map(a => a.pharmacistId)
+          );
+          
+          if (dirWards.length === coveredDirWards.length && dirWards.length > 1 && pharmacistsInDirectorate.size > 1) {
+            fullyAllocatedDirectorates.add(directorate);
+          }
+        }
+        
+        console.log(`[generateRota] PASS 8: Found ${fullyAllocatedDirectorates.size} fully allocated directorates with multiple pharmacists:`, 
+          Array.from(fullyAllocatedDirectorates));
+          
+        // If no fully allocated directorates with enough pharmacists, we can't proceed
+        if (fullyAllocatedDirectorates.size === 0) {
+          console.log(`[generateRota] PASS 8: No directorates with sufficient pharmacists to reallocate. Stopping.`);
+          break;
+        }
+        
+        // Pick the most deficient directorate
+        const [deficientDir, deficientWards] = deficientDirectorates[0];
+        console.log(`[generateRota] PASS 8: Processing directorate ${deficientDir} with ${deficientWards.length} uncovered wards`);
+        
+        // Find eligible pharmacists from fully allocated directorates
+        const eligiblePharmacists: Array<{
+          pharmacist: typeof pharmacists[number];
+          currentWard: typeof activeWards[number];
+          assignment: Assignment;
+        }> = [];
+        
+        // Get all ward assignments
+        const wardAssignments = assignments.filter(a => a.type === "ward");
+        
+        for (const assignment of wardAssignments) {
+          const ward = activeWards.find(w => w.name === assignment.location);
+          if (!ward || !ward.directorate) continue;
+          
+          // Skip if not in a fully allocated directorate
+          if (!fullyAllocatedDirectorates.has(ward.directorate)) continue;
+          
+          // Skip EAU and ITU wards as per requirements
+          if (ward.name.includes("EAU") || ward.name.includes("ITU")) {
+            console.log(`[generateRota] PASS 8: Skipping ${ward.name} as it's protected (EAU/ITU)`);
+            continue;
+          }
+          
+          // Check if removing this pharmacist would leave the directorate without coverage
+          const pharmacistsInSameDirectorate = assignments.filter(a => {
+            if (a.type !== "ward" || a.pharmacistId === assignment.pharmacistId) return false;
+            const w = activeWards.find(ward => ward.name === a.location);
+            return w && w.directorate === ward.directorate;
+          });
+          
+          if (pharmacistsInSameDirectorate.length === 0) {
+            console.log(`[generateRota] PASS 8: Skipping pharmacist on ${ward.name} as they are the only one in directorate ${ward.directorate}`);
+            continue;
+          }
+          
+          const pharmacist = pharmacists.find(p => p && p._id === assignment.pharmacistId);
+          
+          if (pharmacist) {
+            // Add to eligible list
+            eligiblePharmacists.push({
+              pharmacist,
+              currentWard: ward,
+              assignment
+            });
+          }
+        }
+        
+        // Sort eligible pharmacists by:
+        // 1. Non-default pharmacists first
+        // 2. Lower band pharmacists first (band 6, then 7)
+        // 3. Not trained in their current directorate
+        eligiblePharmacists.sort((a, b) => {
+          // Check if they're default pharmacists
+          const aIsDefault = a.pharmacist && a.pharmacist.primaryWards && a.pharmacist.primaryWards.includes(a.currentWard.name);
+          const bIsDefault = b.pharmacist && b.pharmacist.primaryWards && b.pharmacist.primaryWards.includes(b.currentWard.name);
+          
+          if (!aIsDefault && bIsDefault) return -1; // Prefer non-default
+          if (aIsDefault && !bIsDefault) return 1;
+          
+          // Check band - prefer LOWER bands (6, then 7) to move
+          if (a.pharmacist && b.pharmacist) {
+            if (a.pharmacist.band < b.pharmacist.band) return -1; // Lower band comes first
+            if (a.pharmacist.band > b.pharmacist.band) return 1;
+          }
+          
+          // Check if trained in their current directorate
+          const aIsTrained = a.pharmacist && a.pharmacist.trainedDirectorates && a.currentWard.directorate && a.pharmacist.trainedDirectorates.includes(a.currentWard.directorate);
+          const bIsTrained = b.pharmacist && b.pharmacist.trainedDirectorates && b.currentWard.directorate && b.pharmacist.trainedDirectorates.includes(b.currentWard.directorate);
+          
+          if (!aIsTrained && bIsTrained) return -1; // Prefer moving those not trained in their current directorate
+          if (aIsTrained && !bIsTrained) return 1;
+          
+          return 0;
+        });
+        
+        console.log(`[generateRota] PASS 8: Found ${eligiblePharmacists.length} eligible pharmacists to potentially move`);
+        
+        // If no eligible pharmacists, we're done
+        if (eligiblePharmacists.length === 0) {
+          console.log(`[generateRota] PASS 8: No eligible pharmacists to move. Stopping.`);
+          break;
+        }
+        
+        // Pick the first uncovered ward from the deficient directorate
+        const targetWard = deficientWards[0];
+        if (!targetWard) {
+          console.log(`[generateRota] PASS 8: No uncovered wards in deficient directorate. Stopping.`);
+          break;
+        }
+        
+        // Get the best match (lowest band, non-default pharmacist)
+        const bestMatch = eligiblePharmacists[0];
+        if (!bestMatch || !bestMatch.pharmacist) {
+          console.log(`[generateRota] PASS 8: No valid pharmacist match found. Stopping.`);
+          break;
+        }
+        
+        // Using a non-null assertion after checking to help TypeScript understand
+        const pharmacist = bestMatch.pharmacist!;
+        
+        console.log(`[generateRota] PASS 8: Selected ${pharmacist.name} (band ${pharmacist.band}) from ${bestMatch.currentWard.name} to reassign to ${targetWard.name}`);
+        
+        // Remove the existing assignment
+        const existingIndex = assignments.findIndex(a => 
+          a.type === bestMatch.assignment.type && 
+          a.location === bestMatch.assignment.location && 
+          a.pharmacistId === bestMatch.assignment.pharmacistId
+        );
+        
+        if (existingIndex !== -1) {
+          assignments.splice(existingIndex, 1);
+          
+          // Mark the source ward as uncovered since we removed its pharmacist
+          coveredWardNames.delete(bestMatch.assignment.location);
+          
+          // Add the source ward to the uncovered wards list
+          if (!uncoveredWards.includes(bestMatch.assignment.location)) {
+            uncoveredWards.push(bestMatch.assignment.location);
+            console.log(`[generateRota] PASS 8: Added ${bestMatch.assignment.location} to uncovered wards after moving ${pharmacist.name}`);
+          }
+        }
+        
+        // Make the new assignment
+        assignments.push({
+          pharmacistId: pharmacist._id,
+          type: "ward",
+          location: targetWard.name,
+          startTime: "00:00",
+          endTime: "23:59"
+        });
+        
+        console.log(`[generateRota] PASS 8: Moved ${pharmacist.name} from ${bestMatch.currentWard.name} to ${targetWard.name} in deficient directorate ${deficientDir}`);
+        
+        // Remove this ward from uncovered if it was uncovered
+        const uncoveredIndex = uncoveredWards.findIndex(w => w === targetWard.name);
+        if (uncoveredIndex !== -1) {
+          uncoveredWards.splice(uncoveredIndex, 1);
+        }
+        
+        // Update covered wards set
+        coveredWardNames.add(targetWard.name);
+        
+        // Increment counter
+        pharmacistsMoved++;
+        
+        // Check if the source directorate still has at least one pharmacist
+        const sourceDirectorate = bestMatch.currentWard.directorate;
+        if (sourceDirectorate) {
+          const pharmacistsInSourceDirectorate = assignments.filter(a => {
+            if (a.type !== "ward") return false;
+            const ward = activeWards.find(w => w.name === a.location);
+            return ward && ward.directorate === sourceDirectorate;
+          });
+          
+          console.log(`[generateRota] PASS 8: After move, source directorate ${sourceDirectorate} has ${pharmacistsInSourceDirectorate.length} pharmacists remaining`);
+          
+          if (pharmacistsInSourceDirectorate.length === 0) {
+            console.log(`[generateRota] PASS 8: WARNING: Source directorate ${sourceDirectorate} now has no pharmacists`);
+          }
+        }
+        
+        // Re-evaluate after each move
+        console.log(`[generateRota] PASS 8: Re-evaluating after moving ${pharmacistsMoved} pharmacist(s)`);
+      }
+      
+      console.log(`[generateRota] PASS 8: Completed. Moved ${pharmacistsMoved} pharmacists. ${uncoveredWards.length} wards remain uncovered`);
+    } else {
+      console.log(`[generateRota] PASS 8: Skipped - no uncovered wards`);
+    }
+    
+    // --- PASS 9: PAIRING UNCOVERED WARDS WITHIN DIRECTORATES ---
+    console.log(`[generateRota] PASS 9: Starting - Pairing uncovered wards within directorates`);
+    
+    if (uncoveredWards.length > 0) {
+      // Group uncovered wards by directorate
+      const uncoveredByDirectorate: Record<string, typeof activeWards[number][]> = {};
+      
+      for (const ward of uncoveredWards) {
+        if (!ward) continue;
+        
+        const wardObject = activeWards.find(w => w.name === ward);
+        if (!wardObject || !wardObject.directorate) continue;
+        
+        if (!uncoveredByDirectorate[wardObject.directorate]) {
+          uncoveredByDirectorate[wardObject.directorate] = [];
+        }
+        uncoveredByDirectorate[wardObject.directorate].push(wardObject);
+      }
+      
+      // Sort directorates by number of uncovered wards
+      const directoratesWithUncovered = Object.entries(uncoveredByDirectorate)
+        .sort(([_, wardsA], [__, wardsB]) => wardsB.length - wardsA.length); // Sort by most uncovered wards first
+      
+      console.log(`[generateRota] PASS 9: Found ${directoratesWithUncovered.length} directorates with uncovered wards:`, 
+        directoratesWithUncovered.map(([dir, wards]) => `${dir} (${wards.length} wards)`));
+      
+      // Process each directorate with uncovered wards
+      for (const [directorate, dirUncoveredWards] of directoratesWithUncovered) {
+        console.log(`[generateRota] PASS 9: Processing directorate ${directorate} with ${dirUncoveredWards.length} uncovered wards`);
+        
+        // Sort wards within directorate by score/weight (if available) or alphabetically
+        const sortedWards = [...dirUncoveredWards].sort((a, b) => {
+          // If we have difficulty information, use it (lower difficulty = lower priority)
+          if (a.difficulty !== undefined && b.difficulty !== undefined) {
+            return a.difficulty - b.difficulty;
+          }
+          // Otherwise sort alphabetically
+          return a.name.localeCompare(b.name);
+        });
+        
+        // Find pharmacists already assigned to the directorate who could cover additional wards
+        const assignmentsInDirectorate = assignments.filter(a => {
+          if (a.type !== "ward") return false;
+          const ward = activeWards.find(w => w.name === a.location);
+          return ward && ward.directorate === directorate;
+        });
+        
+        // Group these by pharmacist
+        type PharmacistWithWards = {
+          pharmacist: NonNullable<typeof pharmacists[0]>;
+          assignedWards: typeof activeWards[number][];
+        };
+        
+        const pharmacistsInDirectorate: Record<string, PharmacistWithWards> = {};
+        
+        for (const assignment of assignmentsInDirectorate) {
+          const pharmacist = pharmacists.find(p => p && p._id === assignment.pharmacistId);
+          const ward = activeWards.find(w => w.name === assignment.location);
+          
+          if (!pharmacist || !ward) continue;
+          
+          if (!pharmacistsInDirectorate[pharmacist._id]) {
+            pharmacistsInDirectorate[pharmacist._id] = {
+              pharmacist, 
+              assignedWards: []
+            };
+          }
+          
+          pharmacistsInDirectorate[pharmacist._id].assignedWards.push(ward);
+        }
+        
+        // Prioritize pharmacists who already have primary wards in this directorate
+        const candidatePharmacists = Object.values(pharmacistsInDirectorate)
+          .sort((a: PharmacistWithWards, b: PharmacistWithWards) => {
+            // First prioritize pharmacists with multiple primary wards in the directorate
+            const aPrimaryWardCount = a.pharmacist.primaryWards?.filter((wardName: string) => {
+              const ward = activeWards.find(w => w.name === wardName);
+              return ward && ward.directorate === directorate;
+            }).length || 0;
+            
+            const bPrimaryWardCount = b.pharmacist.primaryWards?.filter((wardName: string) => {
+              const ward = activeWards.find(w => w.name === wardName);
+              return ward && ward.directorate === directorate;
+            }).length || 0;
+            
+            if (aPrimaryWardCount > 1 && bPrimaryWardCount <= 1) return -1;
+            if (aPrimaryWardCount <= 1 && bPrimaryWardCount > 1) return 1;
+            
+            // Then prioritize by band (lowest first)
+            const aBand = a.pharmacist.band || '';
+            const bBand = b.pharmacist.band || '';
+            
+            if (aBand < bBand) return -1;
+            if (aBand > bBand) return 1;
+            
+            // Then prioritize those trained in the directorate
+            const aIsTrained = (a.pharmacist.trainedDirectorates || []).includes(directorate);
+            const bIsTrained = (b.pharmacist.trainedDirectorates || []).includes(directorate);
+            
+            if (aIsTrained && !bIsTrained) return -1;
+            if (!aIsTrained && bIsTrained) return 1;
+            
+            return 0;
+          });
+        
+        console.log(`[generateRota] PASS 9: Found ${candidatePharmacists.length} potential pharmacists to cover multiple wards in ${directorate}`);
+        
+        // Pair the lowest priority uncovered wards with pharmacists
+        while (sortedWards.length > 0 && candidatePharmacists.length > 0) {
+          const ward = sortedWards.shift();
+          if (!ward) break;
+          
+          const bestMatch = candidatePharmacists[0]; // Take the best match based on the sorting above
+          
+          console.log(`[generateRota] PASS 9: Assigning ${bestMatch.pharmacist.name} to cover additional ward ${ward.name} in directorate ${directorate}`);
+          
+          // Assign the ward to this pharmacist
+          assignments.push({
+            pharmacistId: bestMatch.pharmacist._id,
+            type: "ward",
+            location: ward.name,
+            startTime: "00:00",
+            endTime: "23:59"
+          });
+          
+          // Mark the ward as covered
+          const uncoveredIndex = uncoveredWards.findIndex(w => w === ward.name);
+          if (uncoveredIndex !== -1) {
+            uncoveredWards.splice(uncoveredIndex, 1);
+          }
+          
+          // Update the pharmacist's assigned wards
+          bestMatch.assignedWards.push(ward);
+          
+          // Re-sort the candidate pharmacists to account for new assignment
+          // This will put pharmacists with the fewest assigned wards at the top
+          candidatePharmacists.sort((a: PharmacistWithWards, b: PharmacistWithWards) => 
+            a.assignedWards.length - b.assignedWards.length
+          );
+          
+          console.log(`[generateRota] PASS 9: ${bestMatch.pharmacist.name} now covers ${bestMatch.assignedWards.length} wards in ${directorate}: ${bestMatch.assignedWards.map((w: typeof activeWards[number]) => w.name).join(', ')}`);
+        }
+      }
+    }
+    
+    console.log(`[generateRota] PASS 9: Completed. ${uncoveredWards.length} wards remain uncovered`);
+
+    // Helper function to check for conflicting clinic assignment
+    function hasClinicConflict(pharmacistId: string, startTime: string, endTime: string, assignments: Assignment[]): boolean {
+      return assignments.some(a =>
+        a.pharmacistId === pharmacistId &&
+        a.type === "clinic" &&
+        // Check for time overlap
+        ((a.startTime < endTime) && (a.endTime > startTime))
+      );
+    }
+
+    // Helper function to check if pharmacist is not available for a given day/time
+    function isPharmacistNotAvailable(
+      pharmacist: Doc<"pharmacists"> | null,
+      dayLabel: string,
+      slotStart: string,
+      slotEnd: string
+    ): boolean {
+      if (!pharmacist || !pharmacist.notAvailableRules) return false;
+      return pharmacist.notAvailableRules.some((rule: {dayOfWeek: string; startTime: string; endTime: string;}) => {
+        if (rule.dayOfWeek !== dayLabel) return false;
+        // If slot overlaps with not available rule
+        return !(slotEnd <= rule.startTime || slotStart >= rule.endTime);
+      });
+    }
+
+    // Helper function to get working pharmacists for a specific day
+    function getWorkingPharmacistsForDay(
+      allPharmacists: (Doc<"pharmacists"> | null)[],
+      args: { pharmacistIds: Id<"pharmacists">[]; pharmacistWorkingDays?: Record<string, string[]> },
+      dayOfWeek: number
+    ): (Doc<"pharmacists"> | null)[] {
+      const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const dayName = dayNames[dayOfWeek];
+      
+      console.log('[getWorkingPharmacistsForDay] Checking for day:', dayName, 'dayOfWeek:', dayOfWeek);
+      
+      // Non-null pharmacists who are in the pharmacistIds list for this rota
+      const nonNullPharmacists = allPharmacists.filter(p => 
+        p !== null && args.pharmacistIds.includes(p._id)
+      );
+      
+      // If pharmacistWorkingDays is provided, further filter those who work today
+      if (args.pharmacistWorkingDays) {
+        console.log('[getWorkingPharmacistsForDay] Checking working days:', args.pharmacistWorkingDays);
+        
+        return nonNullPharmacists.filter(p => {
+          if (!p) return false;
+          
+          const daysForPharmacist = args.pharmacistWorkingDays?.[p._id as string];
+          const worksToday = daysForPharmacist && daysForPharmacist.includes(dayName);
+          
+          console.log(`[getWorkingPharmacistsForDay] Pharmacist ${p.name} works ${dayName}? ${worksToday ? 'YES' : 'NO'} (Days: ${daysForPharmacist?.join(', ') || 'none'})`);
+          
+          return worksToday;
+        });
+      }
+      
+      // If no working days specified, assume all work
+      return nonNullPharmacists;
+    }
+
+    // Helper function to get warfarin clinic pharmacists for today
+    function getWarfarinClinicPharmacists(assignments: Assignment[], clinics: any[]): Set<string> {
+      // Find all assignments for today that are clinics and require warfarin training
+      const warfarinClinicPharmacistIds = new Set<string>();
+      assignments.forEach(a => {
+        if (a.type === "clinic") {
+          // Find the clinic object for this assignment
+          const clinic = clinics.find(c => c.name === a.location);
+          if (clinic && clinic.requiresWarfarinTraining) {
+            warfarinClinicPharmacistIds.add(a.pharmacistId as string);
+          }
+        }
+      });
+      return warfarinClinicPharmacistIds;
+    }
+
+    // Helper function to identify pharmacists covering multiple wards
+    function getMultiWardPharmacists(assignments: Assignment[]): Set<string> {
+      // Group assignments by pharmacist
+      const pharmacistWardCounts: Record<string, string[]> = {};
+      
+      // Count wards per pharmacist
+      assignments.forEach(a => {
+        if (a.type === "ward") {
+          if (!pharmacistWardCounts[a.pharmacistId]) {
+            pharmacistWardCounts[a.pharmacistId] = [];
+          }
+          if (!pharmacistWardCounts[a.pharmacistId].includes(a.location)) {
+            pharmacistWardCounts[a.pharmacistId].push(a.location);
+          }
+        }
+      });
+      
+      // Return the set of pharmacist IDs who cover multiple wards
+      const multiWardPharmacistIds = new Set<string>();
+      Object.entries(pharmacistWardCounts).forEach(([pharmacistId, wards]) => {
+        if (wards.length > 1) {
+          multiWardPharmacistIds.add(pharmacistId);
+        }
+      });
+      
+      return multiWardPharmacistIds;
+    }
+
+    // Helper function to check if a pharmacist is the only one covering any directorate
+    function isSolePharmacistInAnyDirectorate(pharmacistId: string): boolean {
+      // Group ward assignments by directorate
+      const pharmacistsByDirectorate: Record<string, Set<string>> = {};
+      
+      // Build a map of directorates to the pharmacists assigned to them
+      assignments.forEach(a => {
+        if (a.type === "ward") {
+          const ward = activeWards.find(w => w.name === a.location);
+          if (ward && ward.directorate) {
+            if (!pharmacistsByDirectorate[ward.directorate]) {
+              pharmacistsByDirectorate[ward.directorate] = new Set<string>();
+            }
+            pharmacistsByDirectorate[ward.directorate].add(a.pharmacistId);
+          }
+        }
+      });
+      
+      // Check if this pharmacist is the only one in any directorate
+      for (const [directorate, pharmacists] of Object.entries(pharmacistsByDirectorate)) {
+        if (pharmacists.size === 1 && pharmacists.has(pharmacistId)) {
+          console.log(`[generateRota] Pharmacist ${pharmacistId} is the only one covering directorate ${directorate} - exempting from dispensary duty`);
+          return true;
+        }
+      }
+      
+      return false;
+    }
+
     // --- Ensure only one rota per date ---
     // Delete any existing rota for this date before inserting
     const existingRotas = await ctx.db.query("rotas").filter(q => q.eq(q.field("date"), args.date)).collect();
@@ -1682,83 +2878,6 @@ export const generateRota = internalMutation({
     });
   },
 });
-
-// Helper function to check for conflicting clinic assignment
-function hasClinicConflict(pharmacistId: string, startTime: string, endTime: string, assignments: Assignment[]): boolean {
-  return assignments.some(a =>
-    a.pharmacistId === pharmacistId &&
-    a.type === "clinic" &&
-    // Check for time overlap
-    ((a.startTime < endTime) && (a.endTime > startTime))
-  );
-}
-
-// Helper function to check if pharmacist is not available for a given day/time
-function isPharmacistNotAvailable(
-  pharmacist: Doc<"pharmacists"> | null,
-  dayLabel: string,
-  slotStart: string,
-  slotEnd: string
-): boolean {
-  if (!pharmacist || !pharmacist.notAvailableRules) return false;
-  return pharmacist.notAvailableRules.some((rule: {dayOfWeek: string; startTime: string; endTime: string;}) => {
-    if (rule.dayOfWeek !== dayLabel) return false;
-    // If slot overlaps with not available rule
-    return !(slotEnd <= rule.startTime || slotStart >= rule.endTime);
-  });
-}
-
-// Helper function to get working pharmacists for a specific day
-function getWorkingPharmacistsForDay(
-  allPharmacists: (Doc<"pharmacists"> | null)[],
-  args: { pharmacistIds: Id<"pharmacists">[]; pharmacistWorkingDays?: Record<string, string[]> },
-  dayOfWeek: number
-): (Doc<"pharmacists"> | null)[] {
-  const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-  const dayName = dayNames[dayOfWeek];
-  
-  console.log('[getWorkingPharmacistsForDay] Checking for day:', dayName, 'dayOfWeek:', dayOfWeek);
-  
-  // Non-null pharmacists who are in the pharmacistIds list for this rota
-  const nonNullPharmacists = allPharmacists.filter(p => 
-    p !== null && args.pharmacistIds.includes(p._id)
-  );
-    
-  // If pharmacistWorkingDays is provided, further filter those who work today
-  if (args.pharmacistWorkingDays) {
-    console.log('[getWorkingPharmacistsForDay] Checking working days:', args.pharmacistWorkingDays);
-    
-    return nonNullPharmacists.filter(p => {
-      if (!p) return false;
-      
-      const daysForPharmacist = args.pharmacistWorkingDays?.[p._id as string];
-      const worksToday = daysForPharmacist && daysForPharmacist.includes(dayName);
-      
-      console.log(`[getWorkingPharmacistsForDay] Pharmacist ${p.name} works ${dayName}? ${worksToday ? 'YES' : 'NO'} (Days: ${daysForPharmacist?.join(', ') || 'none'})`);
-      
-      return worksToday;
-    });
-  }
-  
-  // If no working days specified, assume all work
-  return nonNullPharmacists;
-}
-
-// Helper function to get warfarin clinic pharmacists for today
-function getWarfarinClinicPharmacists(assignments: Assignment[], clinics: any[]): Set<string> {
-  // Find all assignments for today that are clinics and require warfarin training
-  const warfarinClinicPharmacistIds = new Set<string>();
-  assignments.forEach(a => {
-    if (a.type === "clinic") {
-      // Find the clinic object for this assignment
-      const clinic = clinics.find(c => c.name === a.location);
-      if (clinic && clinic.requiresWarfarinTraining) {
-        warfarinClinicPharmacistIds.add(a.pharmacistId as string);
-      }
-    }
-  });
-  return warfarinClinicPharmacistIds;
-}
 
 export const generateWeeklyRota = mutation({
   args: {

@@ -34,7 +34,7 @@ export function RotaView() {
   }, [rotaAssignments]);
 
   // Helper: Get all wards with directorate info
-  const allWards = directorates.flatMap((d: any) => (d.wards || []).map((w: any) => ({...w, directorate: d.name})));
+  const allWards = directorates.flatMap((d: any) => (d.wards || []).filter((w: any) => w.isActive).map((w: any) => ({...w, directorate: d.name})));
 
   // Define rota time slots
   const TIME_SLOTS = [
@@ -159,7 +159,7 @@ export function RotaView() {
     ];
   }
 
-  // Helper to add a rota-specific unavailable rule
+  // Helper: get all unavailable rules (permanent + rota-specific)
   function addRotaUnavailableRule(pharmacistId: string, rule: { dayOfWeek: string, startTime: string, endTime: string }) {
     setRotaUnavailableRules(prev => {
       const rules = prev[pharmacistId] || [];
@@ -175,7 +175,47 @@ export function RotaView() {
     });
   }
 
-  // --- Add helper to determine pharmacist cell color ---
+  // Helper: check if a pharmacist has overlapping assignments (ward with clinic or dispensary)
+  function hasOverlappingAssignments(
+    pharmacistId: Id<"pharmacists">,
+    date: string,
+    timeSlot: { start: string; end: string }
+  ) {
+    // Check if pharmacist has a ward assignment for this time slot
+    const wardAssignment = rotaAssignments.find(a =>
+      a.type === "ward" &&
+      a.date === date &&
+      a.pharmacistId === pharmacistId &&
+      a.startTime <= timeSlot.start &&
+      a.endTime >= timeSlot.end
+    );
+
+    if (!wardAssignment) return false;
+
+    // Check if pharmacist has a clinic assignment that overlaps with this time slot
+    const clinicAssignment = rotaAssignments.find(a =>
+      a.type === "clinic" &&
+      a.date === date &&
+      a.pharmacistId === pharmacistId &&
+      a.startTime < timeSlot.end &&
+      a.endTime > timeSlot.start
+    );
+
+    if (clinicAssignment) return true;
+
+    // Check if pharmacist has a dispensary assignment that overlaps with this time slot
+    const dispensaryAssignment = rotaAssignments.find(a =>
+      a.type === "dispensary" &&
+      a.date === date &&
+      a.pharmacistId === pharmacistId &&
+      a.startTime < timeSlot.end &&
+      a.endTime > timeSlot.start
+    );
+
+    return !!dispensaryAssignment;
+  }
+
+  // Helper: get pharmacist cell color
   function getPharmacistCellClass(pharmacistId: string) {
     const p = pharmacists.find((p: any) => p._id === pharmacistId);
     if (!p) return '';
@@ -522,102 +562,91 @@ export function RotaView() {
               />
             </div>
             {/* Non-default pharmacists, only show if search is active and not selected */}
-            {pharmacistSearch && ([...pharmacists]
-              .filter((p: any) => !p.isDefaultPharmacist &&
-                !selectedPharmacistIds.includes(p._id) &&
-                p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
-              )
-              .sort((a: any, b: any) => a.name.localeCompare(b.name))
-              .map((pharmacist: any) => (
-                <div key={pharmacist._id} className="border rounded p-2 flex flex-col md:flex-row items-start md:items-center gap-3">
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={selectedPharmacistIds.includes(pharmacist._id)}
-                      onChange={e => {
-                        setSelectedPharmacistIds((ids: Array<Id<"pharmacists">>) => {
-                          const checked = e.target.checked;
-                          if (checked && !ids.includes(pharmacist._id)) {
-                            if (!pharmacistWorkingDays[pharmacist._id]) {
-                              const newObj = { ...pharmacistWorkingDays };
-                              newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
-                              setPharmacistWorkingDaysLogged(newObj);
-                            }
-                            return [...ids, pharmacist._id];
-                          }
-                          if (!checked) {
-                            const newObj = { ...pharmacistWorkingDays };
-                            delete newObj[pharmacist._id];
-                            setPharmacistWorkingDaysLogged(newObj);
-                            return ids.filter(id => id !== pharmacist._id);
-                          }
-                          return ids;
-                        });
-                      }}
-                    />
-                    <span className="font-medium">{pharmacist.name}</span>
-                  </div>
-                  {selectedPharmacistIds.includes(pharmacist._id) && (
-                    <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
-                      <div className="flex gap-2 items-center">
-                        <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
-                        {CLINIC_DAY_LABELS.map((day: string) => (
-                          <label key={day} className="flex items-center gap-1">
-                            <input
-                              type="checkbox"
-                              checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
-                              onChange={e => {
-                                handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
-                              }}
-                            />
-                            <span className="text-xs">{day}</span>
-                          </label>
-                        ))}
-                      </div>
-                      <div className="flex items-center gap-2 ml-4">
-                        <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
-                        <ul className="flex gap-2 mb-0">
-                          {getAllUnavailableRules(pharmacist).map((rule, idx) => (
-                            <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
-                              <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
+            {pharmacistSearch && (
+              <div className="border rounded p-4 mb-4 bg-gray-50">
+                <h4 className="font-medium mb-2">Search Results</h4>
+                {[...pharmacists]
+                  .filter((p: any) => !p.isDefaultPharmacist &&
+                    !selectedPharmacistIds.includes(p._id) &&
+                    p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
+                  )
+                  .sort((a: any, b: any) => a.name.localeCompare(b.name))
+                  .map((pharmacist: any) => {
+                    // Prepare temporary working days state for this pharmacist
+                    const tempWorkingDays = pharmacistWorkingDays[pharmacist._id] || 
+                      (Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS);
+                    
+                    return (
+                      <div key={pharmacist._id} className="border rounded p-2 mb-2 bg-white">
+                        <div className="flex items-center gap-2 mb-2">
+                          <span className="font-medium">{pharmacist.name}</span>
+                          <span className="text-sm text-gray-500">Band {pharmacist.band}</span>
+                          {pharmacist.primaryDirectorate && (
+                            <span className="text-sm bg-gray-100 px-1 py-0.5 rounded">
+                              {pharmacist.primaryDirectorate}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-2 items-center mb-2">
+                          <span className="text-sm font-medium">Available on:</span>
+                          {CLINIC_DAY_LABELS.map((day: string) => {
+                            const isSelected = tempWorkingDays.includes(day);
+                            return (
                               <button
+                                key={day}
                                 type="button"
-                                className="text-red-500 text-xs ml-1"
+                                className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                                  isSelected 
+                                    ? "bg-green-100 text-green-800 border border-green-300" 
+                                    : "bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200"
+                                }`}
                                 onClick={() => {
-                                  if (idx < (pharmacist.notAvailableRules?.length || 0)) {
-                                    const updated = [...(pharmacist.notAvailableRules || [])];
-                                    updated.splice(idx, 1);
-                                    setRotaUnavailableRules(prev => ({
-                                      ...prev,
-                                      [pharmacist._id]: [
-                                        ...((prev[pharmacist._id] || [])),
-                                        ...updated.filter((_, i) => i !== idx)
-                                      ]
-                                    }));
-                                    pharmacist.notAvailableRules.splice(idx, 1);
-                                  } else {
-                                    removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
+                                  // Create a temporary working days state for this pharmacist
+                                  const newObj = { ...pharmacistWorkingDays };
+                                  if (!newObj[pharmacist._id]) {
+                                    newObj[pharmacist._id] = [...tempWorkingDays];
                                   }
+                                  
+                                  if (isSelected) {
+                                    // Remove day if already selected
+                                    newObj[pharmacist._id] = newObj[pharmacist._id].filter(d => d !== day);
+                                  } else {
+                                    // Add day if not selected
+                                    newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
+                                  }
+                                  
+                                  setPharmacistWorkingDaysLogged(newObj);
                                 }}
-                              >✕</button>
-                            </li>
-                          ))}
-                        </ul>
-                        <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
-                        <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
-                        <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
-                        <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
-                          const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
-                          const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
-                          const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
-                          addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
-                        }}>Add</button>
+                              >
+                                {day}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            className="bg-blue-600 text-white text-sm px-3 py-1 rounded hover:bg-blue-700"
+                            onClick={() => {
+                              setSelectedPharmacistIds(ids => [...ids, pharmacist._id]);
+                              setPharmacistSearch(''); // Clear search after adding
+                            }}
+                          >
+                            Add to Rota
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              )))
-            }
+                    );
+                  })}
+                {[...pharmacists]
+                  .filter((p: any) => !p.isDefaultPharmacist &&
+                    !selectedPharmacistIds.includes(p._id) &&
+                    p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
+                  ).length === 0 && (
+                  <div className="text-gray-500 italic">No matching pharmacists found</div>
+                )}
+              </div>
+            )}
           </div>
           <button
             className="mt-4 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
@@ -738,7 +767,10 @@ export function RotaView() {
                 </tr>
               </thead>
               <tbody>
-                {allWards.flatMap((ward: any, idx: number) => {
+                {allWards.flatMap((ward: any, idx: number, arr: any[]) => {
+                  // Check if this is the last ward in a directorate
+                  const isLastInDirectorate = idx < arr.length - 1 && ward.directorate !== arr[idx + 1].directorate;
+                  
                   if (ward.directorate === "EAU") {
                     const todayDates = [...Array(5)].map((_, dayOffset) => {
                       const d = new Date(selectedMonday);
@@ -758,37 +790,53 @@ export function RotaView() {
                         if (list.length > maxRows) maxRows = list.length;
                       });
                     });
-                    return Array.from({ length: maxRows }, (_, rowIdx) => (
-                      <tr key={`${ward.name}_row_${rowIdx}`} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
-                        <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{rowIdx === 0 ? ward.directorate : ''}</td>
-                        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{rowIdx === 0 ? ward.name : ''}</td>
-                        {todayDates.flatMap((isoDate, dayOffset) =>
-                          TIME_SLOTS.map((slot, slotIdx) => {
-                            const list = rotaAssignments.filter(a =>
-                              a.type === "ward" &&
-                              a.date === isoDate &&
-                              a.location === ward.name &&
-                              a.startTime <= slot.start &&
-                              a.endTime >= slot.end
-                            );
-                            const a = list[rowIdx];
-                            return (
-                              <td key={`${isoDate}${slot.start}${slot.end}${ward.name}${rowIdx}`}
-                                className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${a ? getPharmacistCellClass(a.pharmacistId) : ''}`}
-                                style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
-                              >
-                                {a ? getPharmacistName(a.pharmacistId) : ''}
-                              </td>
-                            );
-                          })
-                        )}
-                      </tr>
-                    ));
+                    return Array.from({ length: maxRows }, (_, rowIdx) => {
+                      // Apply directorate separator style to the last row
+                      const isLastRow = rowIdx === maxRows - 1;
+                      const applyDirectorateSeparator = isLastRow && isLastInDirectorate;
+                      const rowStyle = applyDirectorateSeparator ? { borderBottom: '4px solid #9ca3af' } : { borderBottom: '1px solid #e5e7eb' };
+                      
+                      return (
+                        <tr key={`${ward.name}_row_${rowIdx}`} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
+                          <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{rowIdx === 0 ? ward.directorate : ''}</td>
+                          <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{rowIdx === 0 ? ward.name : ''}</td>
+                          {todayDates.flatMap((isoDate, dayOffset) =>
+                            TIME_SLOTS.map((slot, slotIdx) => {
+                              const list = rotaAssignments.filter(a =>
+                                a.type === "ward" &&
+                                a.date === isoDate &&
+                                a.location === ward.name &&
+                                a.startTime <= slot.start &&
+                                a.endTime >= slot.end
+                              );
+                              const a = list[rowIdx];
+                              return (
+                                <td
+                                  key={isoDate + slot.start + slot.end + ward.name + rowIdx}
+                                  className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${a ? getPharmacistCellClass(a.pharmacistId) : ''}`}
+                                  style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                                >
+                                  {a ? (
+                                    <span className={hasOverlappingAssignments(a.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                      {getPharmacistName(a.pharmacistId)}
+                                    </span>
+                                  ) : ''}
+                                </td>
+                              );
+                            })
+                          )}
+                        </tr>
+                      );
+                    });
                   }
+
+                  // Apply directorate separator style
+                  const rowStyle = isLastInDirectorate ? { borderBottom: '4px solid #9ca3af' } : { borderBottom: '1px solid #e5e7eb' };
+                  
                   return [
                     <tr key={ward.directorate + ward.name} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
-                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{ward.directorate}</td>
-                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{ward.name}</td>
+                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{ward.directorate}</td>
+                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{ward.name}</td>
                       {[...Array(5)].flatMap((_, dayOffset: number) => {
                         const date = new Date(selectedMonday);
                         date.setDate(date.getDate() + dayOffset);
@@ -798,9 +846,13 @@ export function RotaView() {
                           return (
                             <td key={isoDate + slot.start + slot.end + ward.name}
                               className={`border p-1 text-center truncate max-w-[70px] text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
-                              style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                              style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
                             >
-                              {assignment ? getPharmacistName(assignment.pharmacistId) : ''}
+                              {assignment ? (
+                                <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                  {getPharmacistName(assignment.pharmacistId)}
+                                </span>
+                              ) : ''}
                             </td>
                           );
                         });
@@ -809,12 +861,12 @@ export function RotaView() {
                   ];
                 })}
                 <tr>
-                  <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" colSpan={2} style={{ borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
+                  <td className="border p-2 font-semibold sticky left-0 bg-white z-10" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
-                    return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
+                    return TIME_SLOTS.map((slot, slotIdx) => {
                       const assignment = getDispensaryAssignment(isoDate, slot);
                       let displayName = '';
                       let isLunch = false;
@@ -826,19 +878,23 @@ export function RotaView() {
                       }
                       return (
                         <td
-                          key={isoDate + slot.start + slot.end + 'dispensary'}
-                          className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayName ? getPharmacistCellClass(assignment?.pharmacistId) : ''}`}
-                          style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          key={dayOffset + '-' + slotIdx}
+                          className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
+                          style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
                         >
                           {displayName && (
                             isLunch ? (
                               <span>
-                                {displayName}
+                                <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                  {displayName}
+                                </span>
                                 <br />
                                 <span style={{ fontWeight: 400 }}>(Lunch)</span>
                               </span>
                             ) : (
-                              displayName
+                              <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                {displayName}
+                              </span>
                             )
                           )}
                         </td>
@@ -850,10 +906,19 @@ export function RotaView() {
                   // Highlight all slots that overlap with the clinic's time range
                   // Add '(Warfarin Clinic)' after the clinic code in the far left column
                   const clinicLabel = `${clinic.name} (Warfarin Clinic)`;
+                  // Determine if this is the first clinic
+                  const isFirstClinic = idx === 0;
+                  // Determine if this is the last clinic
+                  const isLastClinic = idx === sortedSelectedClinics.length - 1;
+                  const rowStyle = {
+                    borderTop: isFirstClinic ? '4px solid #9ca3af' : '1px solid #e5e7eb',
+                    borderBottom: isLastClinic ? '4px solid #9ca3af' : '1px solid #e5e7eb'
+                  };
+                  
                   return (
                     <tr key={clinic._id}>
-                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{clinicLabel}</td>
-                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ borderBottom: '1px solid #e5e7eb' }}>{clinic.name}</td>
+                      <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{clinicLabel}</td>
+                      <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{clinic.name}</td>
                       {[...Array(5)].flatMap((_, dayOffset: number) => {
                         const date = new Date(selectedMonday);
                         date.setDate(date.getDate() + dayOffset);
@@ -873,17 +938,21 @@ export function RotaView() {
                                 key={isoDate + slot.start + slot.end + clinic._id}
                                 className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-100 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
                                 style={{ 
-                                  borderBottom: '1px solid #e5e7eb', 
+                                  ...rowStyle,
                                   borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined,
                                   backgroundColor: assignment ? '#fef9c3' : '#fef9c3', // Maintain yellow background
                                   color: '#000' // Always black text for clinics
                                 }}
                               >
-                                {assignment ? <span style={{ color: 'black', fontWeight: 'bold' }}>{getPharmacistName(assignment.pharmacistId)}</span> : ""}
+                                {assignment ? (
+                                  <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
+                                    {getPharmacistName(assignment.pharmacistId)}
+                                  </span>
+                                ) : ""}
                               </td>
                             );
                           } else {
-                            return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}></td>;
+                            return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}></td>;
                           }
                         });
                       })}
@@ -894,7 +963,7 @@ export function RotaView() {
               {/* --- Unavailable Pharmacists Row --- */}
               <tfoot>
                 <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
+                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -910,7 +979,7 @@ export function RotaView() {
                         );
                       });
                       return (
-                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
+                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
                           {unavailable.map((p: any) => p.name).join(', ') || ''}
                         </td>
                       );
@@ -919,7 +988,7 @@ export function RotaView() {
                 </tr>
                 {/* --- Management Time --- */}
                 <tr>
-                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2} style={{ borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
+                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -941,7 +1010,7 @@ export function RotaView() {
                         <td
                           key={isoDate + slot.start + slot.end + 'management'}
                           className={`border p-1 text-center max-w-[70px] text-xs bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} 
-                          style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
                         >
                           {pharmacistNames.length > 0 ? (
                             <span>{pharmacistNames.join(", ")}</span>
