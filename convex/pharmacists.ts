@@ -3,7 +3,12 @@ import { v } from "convex/values";
 
 export const add = mutation({
   args: {
+    // Legacy field - keeping for backward compatibility
     name: v.string(),
+    // New name fields
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    displayName: v.optional(v.string()), // "Appears in rota as"
     email: v.string(),
     band: v.string(),
     primaryDirectorate: v.string(),
@@ -24,7 +29,18 @@ export const add = mutation({
     }))),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.insert("pharmacists", args);
+    // If firstName/lastName are provided but displayName is not, 
+    // generate a default displayName to ensure the UI always has something to display
+    let argsWithDisplayName = { ...args };
+    
+    if (args.firstName && args.lastName && !args.displayName) {
+      argsWithDisplayName.displayName = `${args.firstName} ${args.lastName.charAt(0)}.`;
+    } else if (!args.displayName) {
+      // Fallback to the legacy name field if no displayName is provided
+      argsWithDisplayName.displayName = args.name;
+    }
+    
+    return await ctx.db.insert("pharmacists", argsWithDisplayName);
   },
 });
 
@@ -47,7 +63,12 @@ export const remove = mutation({
 export const update = mutation({
   args: {
     id: v.id("pharmacists"),
+    // Legacy field - keeping for backward compatibility
     name: v.string(),
+    // New name fields
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    displayName: v.optional(v.string()), // "Appears in rota as"
     email: v.string(),
     band: v.string(),
     primaryDirectorate: v.string(),
@@ -69,6 +90,17 @@ export const update = mutation({
   },
   handler: async (ctx, args) => {
     const { id, ...fields } = args;
-    return await ctx.db.patch(id, fields);
+    
+    // Similar logic to the add handler
+    let fieldsWithDisplayName = { ...fields };
+    
+    if (fields.firstName && fields.lastName && !fields.displayName) {
+      fieldsWithDisplayName.displayName = `${fields.firstName} ${fields.lastName.charAt(0)}.`;
+    } else if (!fields.displayName) {
+      // Fallback to the legacy name field if no displayName is provided
+      fieldsWithDisplayName.displayName = fields.name;
+    }
+    
+    return await ctx.db.patch(id, fieldsWithDisplayName);
   }
 });

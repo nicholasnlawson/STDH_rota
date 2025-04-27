@@ -652,7 +652,7 @@ export const generateRota = internalMutation({
                   p && 
                   args.pharmacistIds.includes(p._id) &&
                   p.band !== "EAU Practitioner" &&
-                  p.band !== "Dispensary Pharmacist" &&
+                  p.band !== "Dispensary Pharmacist" && // Exclude dispensary pharmacists
                   !assignments.some(a => a.pharmacistId === p._id && (a.type === "ward" || a.type === "clinic")) &&
                   !isPharmacistNotAvailable(p, dayLabel, "09:00", "17:00")
                 );
@@ -1694,21 +1694,21 @@ export const generateRota = internalMutation({
           
           if (existingIdx !== -1) {
             assignments.splice(existingIdx, 1);
-          }
-          
-          // If this was the only pharmacist in that directorate, mark it as unfilled
-          if (fromDirectorate !== "unknown") {
-            const directorateStillHasPharmacist = assignments.some(a => {
-              if (a.type === "ward" && a.pharmacistId === chosenPharmacist._id) {
-                const ward = activeWards.find(w => w.name === a.location);
-                return ward && ward.directorate === fromDirectorate;
-              }
-              return false;
-            });
             
-            if (!directorateStillHasPharmacist) {
-              directoratesFilled[fromDirectorate] = false;
-              console.log(`[generateRota] PASS 2: Directorate ${fromDirectorate} now has no pharmacists and will be processed again`);
+            // If this was the only pharmacist in that directorate, mark it as unfilled
+            if (fromDirectorate !== "unknown") {
+              const directorateStillHasPharmacist = assignments.some(a => {
+                if (a.type === "ward" && a.pharmacistId === chosenPharmacist._id) {
+                  const ward = activeWards.find(w => w.name === a.location);
+                  return ward && ward.directorate === fromDirectorate;
+                }
+                return false;
+              });
+              
+              if (!directorateStillHasPharmacist) {
+                directoratesFilled[fromDirectorate] = false;
+                console.log(`[generateRota] PASS 2: Directorate ${fromDirectorate} now has no pharmacists and will be processed again`);
+              }
             }
           }
         }
@@ -3058,4 +3058,60 @@ export const publishRota = mutation({
       status: "published",
     });
   },
+});
+
+export const updateRotaAssignment = mutation({
+  args: {
+    rotaId: v.id("rotas"),
+    assignmentIndex: v.number(),
+    pharmacistId: v.id("pharmacists"),
+    newAssignment: v.optional(v.object({
+      location: v.string(),
+      type: v.union(v.literal("ward"), v.literal("dispensary"), v.literal("clinic"), v.literal("management")),
+      startTime: v.string(),
+      endTime: v.string(),
+      isLunchCover: v.optional(v.boolean())
+    }))
+  },
+  handler: async (ctx, args) => {
+    const { rotaId, assignmentIndex, pharmacistId, newAssignment } = args;
+
+    // Get the current rota
+    const rota = await ctx.db.get(rotaId);
+    if (!rota) {
+      throw new Error("Rota not found");
+    }
+
+    // Create a new array of assignments
+    const assignments = [...rota.assignments];
+
+    if (newAssignment) {
+      // If this is a new assignment, add it to the array
+      assignments.push({
+        pharmacistId,
+        location: newAssignment.location,
+        type: newAssignment.type,
+        startTime: newAssignment.startTime,
+        endTime: newAssignment.endTime,
+        isLunchCover: newAssignment.isLunchCover
+      });
+    } else {
+      // Otherwise update the existing assignment
+      if (assignmentIndex >= assignments.length) {
+        throw new Error("Assignment index out of bounds");
+      }
+
+      assignments[assignmentIndex] = {
+        ...assignments[assignmentIndex],
+        pharmacistId
+      };
+    }
+
+    // Update the rota with the new assignments array
+    await ctx.db.patch(rotaId, {
+      assignments
+    });
+
+    return rotaId;
+  }
 });

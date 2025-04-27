@@ -22,7 +22,12 @@ export function PharmacistList() {
     endTime: string;
   };
   type PharmacistFormData = {
+    // Legacy field - keeping for backward compatibility
     name: string;
+    // New name fields
+    firstName: string;
+    lastName: string;
+    displayName: string; // "Appears in rota as"
     email: string;
     band: string;
     primaryDirectorate: string;
@@ -41,6 +46,9 @@ export function PharmacistList() {
 
   const [formData, setFormData] = useState<PharmacistFormData>({
     name: "",
+    firstName: "",
+    lastName: "",
+    displayName: "",
     email: "",
     band: "6",
     primaryDirectorate: "",
@@ -76,6 +84,9 @@ export function PharmacistList() {
     await addPharmacist({ ...formData, ituTrained: false }); // keep for backend compatibility
     setFormData({
       name: "",
+      firstName: "",
+      lastName: "",
+      displayName: "",
       email: "",
       band: "6",
       primaryDirectorate: "",
@@ -97,6 +108,9 @@ export function PharmacistList() {
     setEditingId(pharmacist._id);
     setEditFormData({
       ...pharmacist,
+      firstName: pharmacist.firstName || "",
+      lastName: pharmacist.lastName || "",
+      displayName: pharmacist.displayName || pharmacist.name,
       workingDays: Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : [],
       notAvailableRules: Array.isArray(pharmacist.notAvailableRules) ? pharmacist.notAvailableRules : [],
       specialistTraining: Array.isArray(pharmacist.specialistTraining) ? pharmacist.specialistTraining : [],
@@ -106,6 +120,19 @@ export function PharmacistList() {
   async function handleEditSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (editingId && editFormData) {
+      // If the name parts are filled but displayName is not, generate it
+      if (editFormData.firstName && editFormData.lastName && !editFormData.displayName) {
+        editFormData.displayName = `${editFormData.firstName} ${editFormData.lastName.charAt(0)}.`;
+      } 
+      // If displayName is still not set, fall back to the legacy name
+      if (!editFormData.displayName) {
+        editFormData.displayName = editFormData.name;
+      }
+      // Keep the legacy name field updated for backward compatibility
+      if (editFormData.firstName && editFormData.lastName && !editFormData.name) {
+        editFormData.name = `${editFormData.firstName} ${editFormData.lastName}`;
+      }
+      
       // Remove Convex system fields before sending to updatePharmacist (runtime only)
       const { _id, _creationTime, ...rest } = (editFormData as any);
       const safeEditFormData: PharmacistFormData = {
@@ -137,14 +164,49 @@ export function PharmacistList() {
       <form onSubmit={handleSubmit} className="space-y-4 mb-8">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium mb-1">Name</label>
+            <label className="block text-sm font-medium mb-1">First Name</label>
+            <input
+              type="text"
+              value={formData.firstName}
+              onChange={e => setFormData({ ...formData, firstName: e.target.value })}
+              className="w-full rounded border-gray-300"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Last Name</label>
+            <input
+              type="text"
+              value={formData.lastName}
+              onChange={e => setFormData({ ...formData, lastName: e.target.value })}
+              className="w-full rounded border-gray-300"
+              required
+            />
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Display Name (Appears in Rota)</label>
+            <input
+              type="text"
+              value={formData.displayName}
+              onChange={e => setFormData({ ...formData, displayName: e.target.value })}
+              placeholder="e.g. John S."
+              className="w-full rounded border-gray-300"
+            />
+            <p className="mt-1 text-xs text-gray-500">
+              How the name appears in the rota. If left blank, it will be generated as "FirstName L."
+            </p>
+          </div>
+          <div>
+            <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
             <input
               type="text"
               value={formData.name}
               onChange={e => setFormData({ ...formData, name: e.target.value })}
               className="w-full rounded border-gray-300"
-              required
             />
+            <p className="mt-1 text-xs text-gray-500">
+              Legacy field. Will be populated automatically from First and Last Name if left blank.
+            </p>
           </div>
           <div>
             <label className="block text-sm font-medium mb-1">Email</label>
@@ -479,14 +541,49 @@ export function PharmacistList() {
                 <form onSubmit={handleEditSubmit} className="mt-4 space-y-4 bg-gray-50 p-4 rounded">
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-sm font-medium mb-1">Name</label>
+                      <label className="block text-sm font-medium mb-1">First Name</label>
+                      <input
+                        type="text"
+                        value={editFormData.firstName}
+                        onChange={e => setEditFormData(f => f && { ...f, firstName: e.target.value })}
+                        className="w-full rounded border-gray-300"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Last Name</label>
+                      <input
+                        type="text"
+                        value={editFormData.lastName}
+                        onChange={e => setEditFormData(f => f && { ...f, lastName: e.target.value })}
+                        className="w-full rounded border-gray-300"
+                        required
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Display Name (Appears in Rota)</label>
+                      <input
+                        type="text"
+                        value={editFormData.displayName}
+                        onChange={e => setEditFormData(f => f && { ...f, displayName: e.target.value })}
+                        placeholder="e.g. John S."
+                        className="w-full rounded border-gray-300"
+                      />
+                      <p className="mt-1 text-xs text-gray-500">
+                        How the name appears in the rota. If left blank, it will be generated as "FirstName L."
+                      </p>
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
                       <input
                         type="text"
                         value={editFormData.name}
                         onChange={e => setEditFormData(f => f && { ...f, name: e.target.value })}
                         className="w-full rounded border-gray-300"
-                        required
                       />
+                      <p className="mt-1 text-xs text-gray-500">
+                        Legacy field. Will be populated automatically from First and Last Name if left blank.
+                      </p>
                     </div>
                     <div>
                       <label className="block text-sm font-medium mb-1">Email</label>
@@ -504,7 +601,7 @@ export function PharmacistList() {
                         value={editFormData.band}
                         onChange={e => {
                           const band = e.target.value;
-                          setEditFormData(f => f && { ...f, band,
+                          setEditFormData(f => f && ({ ...f, band,
                             ...(band === 'Dispensary Pharmacist' || band === 'EAU Practitioner' ? {
                               warfarinTrained: false,
                               specialistTraining: [],
@@ -516,7 +613,7 @@ export function PharmacistList() {
                               preferences: [],
                               availability: [],
                             } : {})
-                          });
+                          }));
                         }}
                         className="w-full rounded border-gray-300"
                         required
@@ -527,7 +624,7 @@ export function PharmacistList() {
                       </select>
                     </div>
                     {/* Only show Trained in Directorates if not Dispensary or Practitioner */}
-                    {!(editFormData && (editFormData.band === "Dispensary Pharmacist" || editFormData.band === "EAU Practitioner")) && (
+                    {!(editFormData.band === "Dispensary Pharmacist" || editFormData.band === "EAU Practitioner") && (
                       <div>
                         <label className="block text-sm font-medium mb-1">Trained in Directorates <span className="text-xs text-gray-400">(optional)</span></label>
                         <div className="flex flex-col space-y-1">
@@ -806,23 +903,60 @@ export function PharmacistList() {
                   }} className="space-y-4">
                     <div className="grid grid-cols-2 gap-4">
                       <div>
-                        <label className="block text-sm font-medium mb-1">Name</label>
+                        <label className="block text-sm font-medium mb-1">First Name</label>
                         <input
                           type="text"
-                          value={editFormData.name}
-                          onChange={e => setEditFormData(f => f && { ...f, name: e.target.value })}
-                          className="w-full rounded border border-gray-300 px-2 py-1"
-                          required
+                          name="firstName"
+                          value={editFormData.firstName}
+                          onChange={(e) => setEditFormData({ ...editFormData, firstName: e.target.value })}
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
                         />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Last Name</label>
+                        <input
+                          type="text"
+                          name="lastName"
+                          value={editFormData.lastName}
+                          onChange={(e) => setEditFormData({ ...editFormData, lastName: e.target.value })}
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Display Name (Appears in Rota)</label>
+                        <input
+                          type="text"
+                          name="displayName"
+                          value={editFormData.displayName}
+                          onChange={(e) => setEditFormData({ ...editFormData, displayName: e.target.value })}
+                          placeholder="e.g. John S."
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">
+                          How the name appears in the rota. If left blank, it will be generated as "FirstName L."
+                        </p>
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
+                        <input
+                          type="text"
+                          name="name"
+                          value={editFormData.name}
+                          onChange={(e) => setEditFormData({ ...editFormData, name: e.target.value })}
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                        />
+                        <p className="mt-1 text-xs text-gray-500">
+                          Legacy field. Will be populated automatically from First and Last Name if left blank.
+                        </p>
                       </div>
                       <div>
                         <label className="block text-sm font-medium mb-1">Email</label>
                         <input
                           type="email"
+                          name="email"
                           value={editFormData.email}
-                          onChange={e => setEditFormData(f => f && { ...f, email: e.target.value })}
-                          className="w-full rounded border border-gray-300 px-2 py-1"
-                          required
+                          onChange={(e) => setEditFormData({ ...editFormData, email: e.target.value })}
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
                         />
                       </div>
                       <div>
@@ -845,8 +979,7 @@ export function PharmacistList() {
                               } : {})
                             }));
                           }}
-                          className="w-full rounded border border-gray-300 px-2 py-1"
-                          required
+                          className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
                         >
                           {["6", "7", "8a", "Dispensary Pharmacist", "EAU Practitioner"].map(band => (
                             <option key={band} value={band}>{band}</option>
@@ -918,7 +1051,7 @@ export function PharmacistList() {
                             <select
                               value={editFormData.primaryDirectorate}
                               onChange={e => setEditFormData(f => f && { ...f, primaryDirectorate: e.target.value, primaryWards: [] })}
-                              className="w-full rounded border border-gray-300 px-2 py-1"
+                              className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
                             >
                               <option value="">Select...</option>
                               {Array.isArray(directorates) && directorates.length > 0 && directorates.map(d => (

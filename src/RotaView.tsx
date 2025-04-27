@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
+import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const CLINIC_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -9,6 +10,7 @@ const CLINIC_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday
 export function RotaView() {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
+  const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
   const clinics = useQuery(api.clinics.listClinics) || [];
   const directorates = useQuery(api.requirements.listDirectorates) || [];
   const [selectedClinicIds, setSelectedClinicIds] = useState<Array<Id<"clinics">>>([]);
@@ -24,9 +26,26 @@ export function RotaView() {
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
   const allRotas = useQuery(api.rotas.listRotas) || [];
   const [rotaAssignments, setRotaAssignments] = useState<any[]>([]);
+  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>({});
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
   const [pharmacistSearch, setPharmacistSearch] = useState("");
+  const [selectedCell, setSelectedCell] = useState<{
+    rotaId: Id<"rotas">,
+    assignmentIndices: number[],
+    currentPharmacistId: Id<"pharmacists"> | null,
+    location: string,
+    date: string,
+    startTime?: string,
+    endTime?: string,
+    newAssignment?: {
+      location: string,
+      type: "ward" | "dispensary" | "clinic" | "management",
+      startTime: string,
+      endTime: string,
+      isLunchCover?: boolean
+    }
+  } | null>(null);
 
   // Log rotaAssignments changes
   useEffect(() => {
@@ -129,8 +148,21 @@ export function RotaView() {
 
   // Helper: get pharmacist name
   function getPharmacistName(pharmacistId: string) {
-    const p = pharmacists.find((p: any) => p._id === pharmacistId);
-    return p ? p.name : "";
+    // Define a more complete type for pharmacist that includes our new fields
+    type PharmacistWithDisplayName = {
+      _id: Id<"pharmacists">;
+      name: string;
+      displayName?: string;
+      firstName?: string;
+      lastName?: string;
+      [key: string]: any; // For other properties we don't need to specify here
+    };
+    
+    const p = pharmacists.find((p: PharmacistWithDisplayName) => p._id === pharmacistId);
+    if (!p) return "";
+  
+    // Use displayName if available, otherwise fall back to the legacy name field
+    return p.displayName || p.name;
   }
 
   // Helper: Get unavailable pharmacists for a given day
@@ -315,22 +347,25 @@ export function RotaView() {
     console.log('[Effect] selectedMonday:', selectedMonday);
     if (!selectedMonday || !allRotas || allRotas.length === 0) return;
     console.log('[Effect] Populating rotaAssignments for week:', selectedMonday);
-    // Fetch rotas for the week (Monday to Friday)
-    const dates = Array.from({ length: 5 }, (v: undefined, i: number) => {
-      const d = new Date(selectedMonday);
-      d.setDate(d.getDate() + i);
-      return d.toISOString().split('T')[0];
+    // Find all rotas for the selected week
+    const weekRotas = allRotas.filter((r: any) => {
+      const rotaDate = new Date(r.date);
+      const selectedDate = new Date(selectedMonday);
+      const daysDiff = Math.floor((rotaDate.getTime() - selectedDate.getTime()) / (1000 * 60 * 60 * 24));
+      return daysDiff >= 0 && daysDiff < 7;
     });
-    // Only use the most recent rota for each date
-    const weekRotas = dates.map((date: string) => {
-      // Find all rotas for this date
-      const rotasForDate = allRotas.filter((r: any) => r.date === date);
-      // Sort by generatedAt descending, pick the latest
-      if (rotasForDate.length === 0) return null;
-      return rotasForDate.sort((a: any, b: any) => b.generatedAt - a.generatedAt)[0];
-    }).filter(Boolean);
-    // Flatten assignments with date info
-    const assignments = weekRotas.flatMap((r: any) => r.assignments.map((a: any) => ({ ...a, date: r.date })));
+
+    // Create a map of dates to rota IDs
+    const rotaMap: Record<string, Id<"rotas">> = {};
+    weekRotas.forEach((rota: any) => {
+      rotaMap[rota.date] = rota._id;
+    });
+    setRotaIdsByDate(rotaMap);
+
+    // Set assignments
+    const assignments = weekRotas.flatMap((r: any) => 
+      r.assignments.map((a: any) => ({ ...a, date: r.date }))
+    );
     console.log('[Effect] Setting rotaAssignments:', assignments);
     setRotaAssignmentsLogged(assignments);
   }, [selectedMonday, allRotas]);
@@ -390,6 +425,380 @@ export function RotaView() {
   const sortedSelectedClinics = clinics
     .filter((c: any) => selectedClinicIds.includes(c._id))
     .sort((a: any, b: any) => (a.dayOfWeek - b.dayOfWeek) || a.startTime.localeCompare(b.startTime));
+
+  // Add helper to get the assignment index within the rota
+  const getAssignmentIndexInRota = (assignment: any) => {
+    const assignmentDate = new Date(assignment.date).toISOString().split('T')[0];
+    const rotaId = rotaIdsByDate[assignmentDate];
+    if (!rotaId) return { rotaId: null, indices: [] };
+
+    const rota = allRotas.find((r: any) => r._id === rotaId);
+    if (!rota) return { rotaId: null, indices: [] };
+
+    // For dispensary assignments, find all slots for the same pharmacist in that time range
+    if (assignment.location === "Dispensary") {
+      const indices = rota.assignments
+        .map((a: any, idx: number) => ({ ...a, idx }))
+        .filter((a: any) => 
+          a.location === "Dispensary" && 
+          a.pharmacistId === assignment.pharmacistId
+        )
+        .map((a: any) => a.idx);
+      return { rotaId, indices };
+    }
+
+    // For other assignments, just find the exact match
+    const index = rota.assignments.findIndex((a: any) => 
+      a.location === assignment.location && 
+      a.start === assignment.start && 
+      a.end === assignment.end
+    );
+
+    return { rotaId, indices: index !== -1 ? [index] : [] };
+  };
+
+  // Add helper to get assignments for scope
+  const getAssignmentsForScope = (
+    location: string, 
+    date: string, 
+    scope: "slot" | "day" | "week",
+    startTime?: string,
+    endTime?: string
+  ): { rotaId: Id<"rotas">, indices: number[] }[] => {
+    console.log(`[getAssignmentsForScope] Called with scope: ${scope}, location: ${location}, date: ${date}, startTime: ${startTime}, endTime: ${endTime}`);
+    const results: { rotaId: Id<"rotas">, indices: number[] }[] = [];
+    
+    // Determine if this is a ward (which uses full-day assignments)
+    const isWard = location.includes("Ward") || location.includes("ITU") || location.includes("Emergency Assessment Unit");
+    console.log(`[getAssignmentsForScope] Location "${location}" is ${isWard ? 'a ward' : 'not a ward'}`);
+    
+    if (scope === "slot") {
+      // For single slot, get the exact assignment
+      const rotaId = rotaIdsByDate[date];
+      if (!rotaId) return results;
+
+      const rota = allRotas.find((r: any) => r._id === rotaId);
+      if (!rota) return results;
+
+      // For wards with slot scope, we need to find the full-day assignment
+      // and create a new assignment for just that time slot
+      if (isWard) {
+        console.log(`[getAssignmentsForScope] Handling ward with slot scope - will create a new time-specific assignment`);
+        // For wards, find the full-day assignment
+        const indices = rota.assignments
+          .map((a: any, idx: number) => ({ ...a, idx }))
+          .filter((a: any) => 
+            a.location === location && 
+            a.startTime === "00:00" && 
+            a.endTime === "23:59"
+          )
+          .map((a: any) => a.idx);
+        
+        console.log(`[getAssignmentsForScope] Found ward full-day assignment indices: ${indices.join(', ')}`);
+        if (indices.length > 0) {
+          results.push({ rotaId, indices });
+        }
+      } else {
+        // For non-wards (dispensary, clinics), find the exact time slot
+        // Ensure startTime and endTime are provided for slot scope
+        if (!startTime || !endTime) {
+          console.error("[getAssignmentsForScope] StartTime or EndTime missing for 'slot' scope.");
+          return results;
+        }
+
+        const indices = rota.assignments
+          .map((a: any, idx: number) => ({ ...a, idx }))
+          .filter((a: any) => 
+            a.location === location && 
+            a.startTime === startTime && // Strict check
+            a.endTime === endTime     // Strict check
+          )
+          .map((a: any) => a.idx);
+          
+        console.log(`[getAssignmentsForScope] Scope: slot, Found indices: ${indices.join(', ')} for rota ${rotaId}`);
+        if (indices.length > 0) {
+          results.push({ rotaId, indices });
+        }
+      }
+    } else if (scope === "day") {
+      // For day, get all assignments for this location on this date
+      const rotaId = rotaIdsByDate[date];
+      if (!rotaId) return results;
+
+      const rota = allRotas.find((r: any) => r._id === rotaId);
+      if (!rota) return results;
+
+      const indices = rota.assignments
+        .map((a: any, idx: number) => ({ ...a, idx }))
+        .filter((a: any) => a.location === location) // Match location only
+        .map((a: any) => a.idx);
+
+      console.log(`[getAssignmentsForScope] Scope: day, Found indices: ${indices.join(', ')} for rota ${rotaId}`);
+      if (indices.length > 0) {
+        results.push({ rotaId, indices });
+      }
+    } else { // week scope
+      // For week, get all assignments for this location across all rotas
+      console.log(`[getAssignmentsForScope] Scope: week, Checking all rotas for location: ${location}`);
+      Object.entries(rotaIdsByDate).forEach(([currentDate, rotaId]) => {
+        const rota = allRotas.find((r: any) => r._id === rotaId);
+        if (!rota) return;
+
+        const indices = rota.assignments
+          .map((a: any, idx: number) => ({ ...a, idx }))
+          .filter((a: any) => a.location === location) // Match location only
+          .map((a: any) => a.idx);
+
+        if (indices.length > 0) {
+          console.log(`[getAssignmentsForScope] Scope: week, Found indices: ${indices.join(', ')} for rota ${rotaId} on date ${currentDate}`);
+          results.push({ rotaId, indices });
+        }
+      });
+    }
+
+    console.log('[getAssignmentsForScope] Returning results:', JSON.stringify(results));
+    return results;
+  };
+
+  // Add helper to determine the assignment to display in a specific cell
+  const getAssignmentForCell = (
+    location: string,
+    date: string,
+    slotStartTime: string,
+    slotEndTime: string,
+    allAssignmentsForDate: any[] // Pass the relevant rota.assignments array for the specific date
+  ): any | null => {
+    // 1. Check for exact slot match
+    const specificAssignment = allAssignmentsForDate.find(a =>
+      a.location === location &&
+      a.startTime === slotStartTime &&
+      a.endTime === slotEndTime
+    );
+
+    if (specificAssignment) {
+      return specificAssignment;
+    }
+
+    // 2. Check if it's a ward
+    const isWard = location.includes("Ward") || location.includes("ITU") || location.includes("Emergency Assessment Unit");
+
+    // 3. If it's a ward and no specific assignment found, check for full-day
+    if (isWard) {
+      const fullDayAssignment = allAssignmentsForDate.find(a =>
+        a.location === location &&
+        a.startTime === '00:00' &&
+        a.endTime === '23:59'
+      );
+      if (fullDayAssignment) {
+        return fullDayAssignment;
+      }
+    }
+
+    // 4. No specific or relevant full-day assignment found
+    return null;
+  };
+
+  // Add handler for empty cell click
+  const handleEmptyCellClick = (location: string, type: "ward" | "dispensary" | "clinic" | "management", date: string, start: string, end: string) => {
+    const assignmentDate = new Date(date).toISOString().split('T')[0];
+    const rotaId = rotaIdsByDate[assignmentDate];
+    if (!rotaId) {
+      console.error('No rota found for date:', assignmentDate);
+      return;
+    }
+
+    setSelectedCell({ 
+      rotaId, 
+      assignmentIndices: [], 
+      currentPharmacistId: null,
+      location,
+      date: assignmentDate,
+      startTime: start,
+      endTime: end,
+      newAssignment: {
+        location,
+        type,
+        startTime: start,
+        endTime: end
+      }
+    });
+    setShowPharmacistSelection(true);
+  };
+
+  // Add handler for cell click
+  const handleCellClick = (
+    assignment: any, 
+    currentPharmacistId: Id<"pharmacists">,
+    cellStartTime: string, 
+    cellEndTime: string
+  ) => {
+    const assignmentDate = new Date(assignment.date).toISOString().split('T')[0];
+    const rotaId = rotaIdsByDate[assignmentDate];
+    if (!rotaId) {
+      console.error('No rota found for date:', assignmentDate);
+      return;
+    }
+
+    // Find the assignment index
+    const rota = allRotas.find((r: any) => r._id === rotaId);
+    if (!rota) return;
+
+    const assignmentIndex = rota.assignments.findIndex((a: any) => 
+      a.location === assignment.location && 
+      a.startTime === assignment.startTime && 
+      a.endTime === assignment.endTime &&
+      a.pharmacistId === currentPharmacistId
+    );
+
+    if (assignmentIndex === -1) {
+      console.error('Could not find assignment in rota');
+      return;
+    }
+
+    setSelectedCell({ 
+      rotaId,
+      assignmentIndices: [assignmentIndex],
+      currentPharmacistId,
+      location: assignment.location,
+      date: assignmentDate,
+      startTime: cellStartTime,
+      endTime: cellEndTime
+    });
+    setShowPharmacistSelection(true);
+  };
+
+  // Update handler for pharmacist selection
+  const handlePharmacistSelect = async (pharmacistId: Id<"pharmacists">, scope: "slot" | "day" | "week") => {
+    if (!selectedCell) return;
+    const newAssignment = selectedCell.newAssignment;
+    console.log(`[handlePharmacistSelect] Started. Scope: ${scope}, PharmacistID: ${pharmacistId}, Location: ${selectedCell.location}, Date: ${selectedCell.date}, Start: ${selectedCell.startTime}, End: ${selectedCell.endTime}`);
+
+    try {
+      // Determine if this is a ward (which uses full-day assignments)
+      const isWard = selectedCell.location.includes("Ward") || 
+                    selectedCell.location.includes("ITU") || 
+                    selectedCell.location.includes("Emergency Assessment Unit");
+
+      if (newAssignment) {
+        console.log("[handlePharmacistSelect] Handling new assignment creation.");
+        // For new assignments, create a new slot
+        await updateAssignment({
+          rotaId: selectedCell.rotaId,
+          assignmentIndex: -1,
+          pharmacistId,
+          newAssignment
+        });
+        console.log("[handlePharmacistSelect] Initial new assignment created.");
+
+        // If scope is day or week, create additional slots
+        if (scope !== "slot") {
+          console.log(`[handlePharmacistSelect] Creating additional slots for scope: ${scope}`);
+          const timeSlots = TIME_SLOTS.map(slot => ({
+            startTime: slot.start,
+            endTime: slot.end
+          })).filter(slot => 
+            // Don't duplicate the slot we just created
+            slot.startTime !== newAssignment.startTime ||
+            slot.endTime !== newAssignment.endTime
+          );
+
+          // For week scope, get all dates
+          const dates = scope === "week" 
+            ? Object.keys(rotaIdsByDate)
+            : [selectedCell.date];
+
+          // Create assignments for each time slot and date
+          for (const date of dates) {
+            const rotaId = rotaIdsByDate[date];
+            if (!rotaId) continue;
+
+            for (const slot of timeSlots) {
+              await updateAssignment({
+                rotaId,
+                assignmentIndex: -1,
+                pharmacistId,
+                newAssignment: {
+                  location: newAssignment.location,
+                  type: newAssignment.type,
+                  startTime: slot.startTime,
+                  endTime: slot.endTime
+                }
+              });
+            }
+          }
+          console.log(`[handlePharmacistSelect] Finished creating additional slots for scope: ${scope}`);
+        }
+      } else {
+        console.log("[handlePharmacistSelect] Handling existing assignment update.");
+        
+        // Special handling for ward assignments with slot scope
+        if (isWard && scope === "slot" && selectedCell.startTime && selectedCell.endTime) {
+          console.log("[handlePharmacistSelect] Special handling for ward with slot scope");
+          
+          // For wards with slot scope, we'll create a new time-specific assignment
+          // while keeping the original full-day assignment
+          await updateAssignment({
+            rotaId: selectedCell.rotaId,
+            assignmentIndex: -1, // Create new
+            pharmacistId,
+            newAssignment: {
+              location: selectedCell.location,
+              type: "ward",
+              startTime: selectedCell.startTime,
+              endTime: selectedCell.endTime
+            }
+          });
+          
+          console.log("[handlePharmacistSelect] Created time-specific ward assignment");
+        } else {
+          // For all other cases, get assignments based on scope
+          const assignmentsToUpdate = getAssignmentsForScope(
+            selectedCell.location, 
+            selectedCell.date, 
+            scope,
+            selectedCell.startTime,
+            selectedCell.endTime
+          );
+          
+          console.log(`[handlePharmacistSelect] Assignments found by getAssignmentsForScope for scope '${scope}':`, JSON.stringify(assignmentsToUpdate));
+
+          if (assignmentsToUpdate.length === 0) {
+             console.warn("[handlePharmacistSelect] No assignments found to update for the selected scope and details.");
+          }
+
+          // Update each assignment
+          for (const { rotaId, indices } of assignmentsToUpdate) {
+             console.log(`[handlePharmacistSelect] Processing Rota ID: ${rotaId}, Indices: ${indices.join(', ')}`);
+             for (const index of indices) {
+              console.log(`[handlePharmacistSelect] -> Calling updateAssignment for Rota ID: ${rotaId}, Index: ${index}`);
+              await updateAssignment({
+                rotaId,
+                assignmentIndex: index,
+                pharmacistId
+              });
+            }
+          }
+        }
+        console.log("[handlePharmacistSelect] Finished updating existing assignments.");
+      }
+
+      // Refresh assignments - Let's keep this for now, but be aware it might cause visual glitches if Convex reactivity is faster/slower
+       console.log("[handlePharmacistSelect] Refreshing local rotaAssignments state.");
+       const refreshedAssignments = allRotas.flatMap((r: any) => 
+         r.assignments.map((a: any) => ({ ...a, date: r.date }))
+       );
+       setRotaAssignments(refreshedAssignments); // Assuming setRotaAssignments is the correct setter
+       console.log("[handlePharmacistSelect] Local state refreshed.");
+
+    } catch (error) {
+      console.error('[handlePharmacistSelect] Failed to update assignment:', error);
+    } finally {
+       // Always close the modal and clear selection
+       setSelectedCell(null);
+       setShowPharmacistSelection(false);
+       console.log("[handlePharmacistSelect] Modal closed and selection cleared.");
+    }
+  };
 
   return (
     <div className="bg-white rounded-lg shadow p-6">
@@ -802,23 +1211,32 @@ export function RotaView() {
                           <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{rowIdx === 0 ? ward.name : ''}</td>
                           {todayDates.flatMap((isoDate, dayOffset) =>
                             TIME_SLOTS.map((slot, slotIdx) => {
-                              const list = rotaAssignments.filter(a =>
-                                a.type === "ward" &&
-                                a.date === isoDate &&
-                                a.location === ward.name &&
-                                a.startTime <= slot.start &&
-                                a.endTime >= slot.end
-                              );
-                              const a = list[rowIdx];
+                              // Get assignments specifically for this date
+                              const assignmentsForDate = rotaAssignments.filter(a => a.date === isoDate);
+                              // Determine the assignment to display in this cell
+                              const cellAssignment = getAssignmentForCell(ward.name, isoDate, slot.start, slot.end, assignmentsForDate);
+                              // Find the assignment matching the specific row index if multiple pharmacists assigned (legacy check?)
+                              // This part might need review if the underlying data structure changes
+                              const assignmentToShow = assignmentsForDate.filter(a => 
+                                  a.type === "ward" && 
+                                  a.location === ward.name && 
+                                  a.startTime <= slot.start && 
+                                  a.endTime >= slot.end
+                              )[rowIdx];
+                              // Use cellAssignment determined by the new logic, but fall back to assignmentToShow maybe?
+                              // Let's prioritize cellAssignment for now.
+                              const displayAssignment = cellAssignment; // Or potentially assignmentToShow if cellAssignment logic misses multi-row cases?
+                              
                               return (
                                 <td
                                   key={isoDate + slot.start + slot.end + ward.name + rowIdx}
-                                  className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${a ? getPharmacistCellClass(a.pharmacistId) : ''}`}
+                                  className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignment ? getPharmacistCellClass(displayAssignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'}`}
                                   style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                                  onClick={() => displayAssignment ? handleCellClick(displayAssignment, displayAssignment.pharmacistId, slot.start, slot.end) : handleEmptyCellClick(ward.name, "ward", isoDate, slot.start, slot.end)}
                                 >
-                                  {a ? (
-                                    <span className={hasOverlappingAssignments(a.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
-                                      {getPharmacistName(a.pharmacistId)}
+                                  {displayAssignment ? (
+                                    <span className={hasOverlappingAssignments(displayAssignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                      {getPharmacistName(displayAssignment.pharmacistId)}
                                     </span>
                                   ) : ''}
                                 </td>
@@ -842,24 +1260,58 @@ export function RotaView() {
                         date.setDate(date.getDate() + dayOffset);
                         const isoDate = date.toISOString().split('T')[0];
                         return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
-                          const assignment = getWardAssignment(isoDate, ward.name, slot);
+                          // Get assignments specifically for this date
+                          const assignmentsForDate = rotaAssignments.filter(a => a.date === isoDate);
+                          // Determine the assignment to display in this cell using the new logic
+                          const displayAssignment = getAssignmentForCell(ward.name, isoDate, slot.start, slot.end, assignmentsForDate);
+                          // Note: The rowIdx logic for multiple assignments per slot is currently bypassed
+                          // by prioritizing the result from getAssignmentForCell.
+
                           return (
-                            <td key={isoDate + slot.start + slot.end + ward.name}
-                              className={`border p-1 text-center truncate max-w-[70px] text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
-                              style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                            <td
+                              key={isoDate + slot.start + slot.end + ward.name}
+                              className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignment ? getPharmacistCellClass(displayAssignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'}`}
+                              style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                              // Use displayAssignment for the click handler, passing the specific slot times
+                              onClick={() => displayAssignment ? handleCellClick(displayAssignment, displayAssignment.pharmacistId, slot.start, slot.end) : handleEmptyCellClick(ward.name, "ward", isoDate, slot.start, slot.end)}
                             >
-                              {assignment ? (
-                                <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
-                                  {getPharmacistName(assignment.pharmacistId)}
+                              {displayAssignment ? (
+                                // Display name based on the found assignment
+                                <span className={hasOverlappingAssignments(displayAssignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                                  {getPharmacistName(displayAssignment.pharmacistId)}
                                 </span>
                               ) : ''}
                             </td>
                           );
-                        });
+                        })
                       })}
                     </tr>
                   ];
                 })}
+                <tr>
+                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
+                  {[0,1,2,3,4].flatMap((dayOffset: number) => {
+                    const date = new Date(selectedMonday);
+                    date.setDate(date.getDate() + dayOffset);
+                    const isoDate = date.toISOString().split('T')[0];
+                    return TIME_SLOTS.map((slot, slotIdx) => {
+                      // For this slot, get pharmacists unavailable at this day/slot
+                      const unavailable = pharmacists.filter((p: any) => {
+                        if (!p.notAvailableRules || !Array.isArray(p.notAvailableRules)) return false;
+                        return p.notAvailableRules.some((rule: any) =>
+                          rule.dayOfWeek === DAYS[date.getDay()] &&
+                          !(rule.endTime <= slot.start || rule.startTime >= slot.end)
+                        );
+                      });
+                      return (
+                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
+                          {unavailable.map((p: any) => p.name).join(', ') || ''}
+                        </td>
+                      );
+                    });
+                  })}
+                </tr>
+                {/* --- Dispensary --- */}
                 <tr>
                   <td className="border p-2 font-semibold sticky left-0 bg-white z-10" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
@@ -872,15 +1324,16 @@ export function RotaView() {
                       let isLunch = false;
                       if (assignment) {
                         displayName = getPharmacistName(assignment.pharmacistId);
-                        if (assignment.isLunchCover && slot.start === '13:00' && slot.end === '15:00') {
+                        if (assignment.isLunchCover && slot.start === '13:30' && slot.end === '14:00') {
                           isLunch = true;
                         }
                       }
                       return (
                         <td
                           key={dayOffset + '-' + slotIdx}
-                          className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : ''}`}
+                          className={`border p-1 text-xs bg-gray-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'}`}
                           style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          onClick={() => assignment ? handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end) : handleEmptyCellClick("Dispensary", "dispensary", isoDate, slot.start, slot.end)}
                         >
                           {displayName && (
                             isLunch ? (
@@ -892,7 +1345,7 @@ export function RotaView() {
                                 <span style={{ fontWeight: 400 }}>(Lunch)</span>
                               </span>
                             ) : (
-                              <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
+                              <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
                                 {displayName}
                               </span>
                             )
@@ -943,6 +1396,7 @@ export function RotaView() {
                                   backgroundColor: assignment ? '#fef9c3' : '#fef9c3', // Maintain yellow background
                                   color: '#000' // Always black text for clinics
                                 }}
+                                onClick={() => assignment && handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end)}
                               >
                                 {assignment ? (
                                   <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
@@ -968,7 +1422,6 @@ export function RotaView() {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
-                    // For this day, get unavailable pharmacists for each slot
                     return TIME_SLOTS.map((slot, slotIdx) => {
                       // For this slot, get pharmacists unavailable at this day/slot
                       const unavailable = pharmacists.filter((p: any) => {
@@ -988,12 +1441,12 @@ export function RotaView() {
                 </tr>
                 {/* --- Management Time --- */}
                 <tr>
-                  <td className="border p-2 font-semibold sticky left-0 bg-blue-100 z-10 truncate max-w-[120px]" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
+                  <td colSpan={2} className="border p-2 font-semibold bg-blue-100 z-10 truncate max-w-[120px]" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
-                    return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
+                    return TIME_SLOTS.map((slot, slotIdx) => {
                       // Find Band 8a pharmacists in Management Time for this date/slot
                       const managementAssignments = rotaAssignments.filter(a => 
                         a.type === "management" && 
@@ -1024,6 +1477,19 @@ export function RotaView() {
             </table>
           </div>
         </div>
+      )}
+      {/* Add the PharmacistSelectionModal */}
+      {showPharmacistSelection && selectedCell && (
+        <PharmacistSelectionModal
+          isOpen={showPharmacistSelection}
+          onClose={() => {
+            setShowPharmacistSelection(false);
+            setSelectedCell(null);
+          }}
+          onSelect={handlePharmacistSelect}
+          currentPharmacistId={selectedCell.currentPharmacistId}
+          location={selectedCell.location}
+        />
       )}
     </div>
   );

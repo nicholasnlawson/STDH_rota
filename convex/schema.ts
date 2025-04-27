@@ -5,6 +5,9 @@ import { authTables } from "@convex-dev/auth/server";
 const applicationTables = {
   pharmacists: defineTable({
     name: v.string(),
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),
+    displayName: v.optional(v.string()),
     email: v.string(),
     band: v.string(),
     primaryDirectorate: v.string(),
