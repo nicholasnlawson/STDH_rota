@@ -964,20 +964,23 @@ export function RotaView() {
             <div className="mb-3 flex items-center gap-2">
               <input
                 type="text"
-                placeholder="Search non-default pharmacists..."
+                placeholder="Search pharmacists..."
                 className="border rounded px-2 py-1 w-64"
                 value={pharmacistSearch}
                 onChange={e => setPharmacistSearch(e.target.value)}
               />
             </div>
-            {/* Non-default pharmacists, only show if search is active and not selected */}
-            {pharmacistSearch && (
+            {/* Non-default pharmacists, always shown and filtered by search */}
+            {(
               <div className="border rounded p-4 mb-4 bg-gray-50">
                 <h4 className="font-medium mb-2">Search Results</h4>
                 {[...pharmacists]
-                  .filter((p: any) => !p.isDefaultPharmacist &&
+                  .filter((p: any) => 
+                    // Only show non-default pharmacists that aren't already selected
+                    !p.isDefaultPharmacist &&
                     !selectedPharmacistIds.includes(p._id) &&
-                    p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
+                    // Filter by search text if provided
+                    (pharmacistSearch === '' || p.name.toLowerCase().includes(pharmacistSearch.toLowerCase()))
                   )
                   .sort((a: any, b: any) => a.name.localeCompare(b.name))
                   .map((pharmacist: any) => {
@@ -1048,11 +1051,12 @@ export function RotaView() {
                     );
                   })}
                 {[...pharmacists]
-                  .filter((p: any) => !p.isDefaultPharmacist &&
+                  .filter((p: any) => 
+                    !p.isDefaultPharmacist &&
                     !selectedPharmacistIds.includes(p._id) &&
-                    p.name.toLowerCase().includes(pharmacistSearch.toLowerCase())
+                    (pharmacistSearch === '' || p.name.toLowerCase().includes(pharmacistSearch.toLowerCase()))
                   ).length === 0 && (
-                  <div className="text-gray-500 italic">No matching pharmacists found</div>
+                  <div className="text-gray-500 italic">No non-default pharmacists available</div>
                 )}
               </div>
             )}
@@ -1287,30 +1291,8 @@ export function RotaView() {
                       })}
                     </tr>
                   ];
-                })}
-                <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
-                  {[0,1,2,3,4].flatMap((dayOffset: number) => {
-                    const date = new Date(selectedMonday);
-                    date.setDate(date.getDate() + dayOffset);
-                    const isoDate = date.toISOString().split('T')[0];
-                    return TIME_SLOTS.map((slot, slotIdx) => {
-                      // For this slot, get pharmacists unavailable at this day/slot
-                      const unavailable = pharmacists.filter((p: any) => {
-                        if (!p.notAvailableRules || !Array.isArray(p.notAvailableRules)) return false;
-                        return p.notAvailableRules.some((rule: any) =>
-                          rule.dayOfWeek === DAYS[date.getDay()] &&
-                          !(rule.endTime <= slot.start || rule.startTime >= slot.end)
-                        );
-                      });
-                      return (
-                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
-                          {unavailable.map((p: any) => p.name).join(', ') || ''}
-                        </td>
-                      );
-                    });
-                  })}
-                </tr>
+                })}                
+
                 {/* --- Dispensary --- */}
                 <tr>
                   <td className="border p-2 font-semibold sticky left-0 bg-white z-10" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
@@ -1324,7 +1306,8 @@ export function RotaView() {
                       let isLunch = false;
                       if (assignment) {
                         displayName = getPharmacistName(assignment.pharmacistId);
-                        if (assignment.isLunchCover && slot.start === '13:30' && slot.end === '14:00') {
+                        // Check if this is a lunch cover assignment, regardless of time slot
+                        if (assignment.isLunchCover) {
                           isLunch = true;
                         }
                       }
@@ -1336,19 +1319,11 @@ export function RotaView() {
                           onClick={() => assignment ? handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end) : handleEmptyCellClick("Dispensary", "dispensary", isoDate, slot.start, slot.end)}
                         >
                           {displayName && (
-                            isLunch ? (
-                              <span>
-                                <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}>
-                                  {displayName}
-                                </span>
-                                <br />
-                                <span style={{ fontWeight: 400 }}>(Lunch)</span>
-                              </span>
-                            ) : (
+                            <div className="text-center">
                               <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
-                                {displayName}
+                                {displayName}{isLunch && " (lunch cover)"}
                               </span>
-                            )
+                            </div>
                           )}
                         </td>
                       );
