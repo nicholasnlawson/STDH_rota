@@ -197,7 +197,7 @@ export function PharmacistList() {
             </p>
           </div>
           <div>
-            <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
+            <label className="block text-sm font-medium mb-1">Full Name</label>
             <input
               type="text"
               value={formData.name}
@@ -205,7 +205,7 @@ export function PharmacistList() {
               className="w-full rounded border-gray-300"
             />
             <p className="mt-1 text-xs text-gray-500">
-              Legacy field. Will be populated automatically from First and Last Name if left blank.
+              Will be populated automatically from First and Last Name if left blank.
             </p>
           </div>
           <div>
@@ -574,7 +574,7 @@ export function PharmacistList() {
                       </p>
                     </div>
                     <div>
-                      <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
+                      <label className="block text-sm font-medium mb-1">Full Name</label>
                       <input
                         type="text"
                         value={editFormData.name}
@@ -582,7 +582,7 @@ export function PharmacistList() {
                         className="w-full rounded border-gray-300"
                       />
                       <p className="mt-1 text-xs text-gray-500">
-                        Legacy field. Will be populated automatically from First and Last Name if left blank.
+                        Will be populated automatically from First and Last Name if left blank.
                       </p>
                     </div>
                     <div>
@@ -937,7 +937,7 @@ export function PharmacistList() {
                         </p>
                       </div>
                       <div>
-                        <label className="block text-sm font-medium mb-1">Full Name (Legacy)</label>
+                        <label className="block text-sm font-medium mb-1">Full Name</label>
                         <input
                           type="text"
                           name="name"
@@ -946,7 +946,7 @@ export function PharmacistList() {
                           className="block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
                         />
                         <p className="mt-1 text-xs text-gray-500">
-                          Legacy field. Will be populated automatically from First and Last Name if left blank.
+                          Will be populated automatically from First and Last Name if left blank.
                         </p>
                       </div>
                       <div>

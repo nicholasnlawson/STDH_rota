@@ -1225,7 +1225,7 @@ export function RotaView() {
                               )[rowIdx];
                               // Use cellAssignment determined by the new logic, but fall back to assignmentToShow maybe?
                               // Let's prioritize cellAssignment for now.
-                              const displayAssignment = cellAssignment; // Or potentially assignmentToShow if cellAssignment logic misses multi-row cases?
+                              const displayAssignment = assignmentToShow || cellAssignment; // Or potentially assignmentToShow if cellAssignment logic misses multi-row cases?
                               
                               return (
                                 <td
