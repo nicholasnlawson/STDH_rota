@@ -172,14 +172,29 @@ export function UserProfile({ pharmacist }: UserProfileProps) {
         formDataToSubmit.displayName = formDataToSubmit.name;
       }
       
-      // Update user data
+      // IMPORTANT: Create a clean object without any internal Convex fields
+      // Only include the fields that are expected by the schema
       await updatePharmacist({
         id: pharmacist._id,
-        ...formDataToSubmit,
+        name: formDataToSubmit.name,
+        firstName: formDataToSubmit.firstName,
+        lastName: formDataToSubmit.lastName,
+        displayName: formDataToSubmit.displayName,
+        email: formDataToSubmit.email,
+        band: formDataToSubmit.band,
+        primaryDirectorate: formDataToSubmit.primaryDirectorate,
+        warfarinTrained: formDataToSubmit.warfarinTrained,
         // These fields should not be changeable by the user
         isAdmin: pharmacist.isAdmin,
         isDefaultPharmacist: pharmacist.isDefaultPharmacist,
         ituTrained: pharmacist.ituTrained,
+        preferences: formDataToSubmit.preferences || [],
+        availability: formDataToSubmit.availability || [],
+        trainedDirectorates: formDataToSubmit.trainedDirectorates || [],
+        primaryWards: formDataToSubmit.primaryWards || [],
+        workingDays: formDataToSubmit.workingDays || [],
+        specialistTraining: formDataToSubmit.specialistTraining || [],
+        notAvailableRules: formDataToSubmit.notAvailableRules || []
       });
       
       // Exit edit mode

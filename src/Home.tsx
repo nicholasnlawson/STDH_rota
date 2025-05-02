@@ -77,7 +77,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
             </div>
           )}
           {view === "rota" && <RotaView />}
-          {view === "publishedRotas" && <PublishedRotasList />}
+          {view === "publishedRotas" && <PublishedRotasList isAdmin={isAdmin} />}
           {view === "profile" && currentPharmacist && (
             <UserProfile pharmacist={{
               ...currentPharmacist,

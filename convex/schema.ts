@@ -78,9 +78,14 @@ const applicationTables = {
         isLunchCover: v.optional(v.boolean()),
       })
     ),
-    status: v.union(v.literal("draft"), v.literal("published")),
+    status: v.union(v.literal("draft"), v.literal("published"), v.literal("archived")),
     generatedBy: v.string(),
     generatedAt: v.number(),
+    // Publication metadata
+    publishedBy: v.optional(v.string()),
+    publishedAt: v.optional(v.string()),
+    publishDate: v.optional(v.string()), // Formatted date
+    publishTime: v.optional(v.string()), // Formatted time
     conflicts: v.optional(v.array(
       v.object({
         type: v.string(),

@@ -7,10 +7,23 @@ import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const CLINIC_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
 
-export function RotaView() {
+interface RotaViewProps {
+  isViewOnly?: boolean;
+  initialSelectedMonday?: string;
+  initialRotaAssignments?: any[];
+  initialRotaIdsByDate?: Record<string, Id<"rotas">>;
+}
+
+export function RotaView({
+  isViewOnly = false,
+  initialSelectedMonday = "",
+  initialRotaAssignments = [],
+  initialRotaIdsByDate = {}
+}: RotaViewProps = {}) {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
   const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
+  const publishRota = useMutation(api.rotas.publishRota);
   const clinics = useQuery(api.clinics.listClinics) || [];
   const directorates = useQuery(api.requirements.listDirectorates) || [];
   const [selectedClinicIds, setSelectedClinicIds] = useState<Array<Id<"clinics">>>([]);
@@ -18,15 +31,40 @@ export function RotaView() {
     // Preselect default pharmacists
     return (pharmacists.filter((p: any) => p.isDefaultPharmacist).map((p: any) => p._id) || []);
   });
-  const [selectedMonday, setSelectedMonday] = useState("");
+  const [selectedMonday, setSelectedMonday] = useState(initialSelectedMonday);
   const [generatingWeekly, setGeneratingWeekly] = useState(false);
   const [showClinicSelection, setShowClinicSelection] = useState(false);
   const [showPharmacistSelection, setShowPharmacistSelection] = useState(false);
-  const [rotaGenerated, setRotaGenerated] = useState(false);
+  const [rotaGenerated, setRotaGenerated] = useState(isViewOnly || false);
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishSuccess, setPublishSuccess] = useState(false);
+  // Track current user for tracking metadata when publishing
+  const [currentUser, setCurrentUser] = useState<{name: string, email: string}>(() => {
+    // Try to get user info from localStorage - use currentPharmacist which is the correct key
+    const storedUser = localStorage.getItem('currentPharmacist');
+    return storedUser ? JSON.parse(storedUser) : { name: 'Unknown User', email: '' };
+  });
+  
+  // Update currentUser whenever localStorage changes
+  useEffect(() => {
+    const handleStorageChange = () => {
+      const storedUser = localStorage.getItem('currentPharmacist');
+      if (storedUser) {
+        setCurrentUser(JSON.parse(storedUser));
+      }
+    };
+    
+    // Check if we need to update right away
+    handleStorageChange();
+    
+    // Listen for changes
+    window.addEventListener('storage', handleStorageChange);
+    return () => window.removeEventListener('storage', handleStorageChange);
+  }, []);
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
   const allRotas = useQuery(api.rotas.listRotas) || [];
-  const [rotaAssignments, setRotaAssignments] = useState<any[]>([]);
-  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>({});
+  const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments);
+  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate);
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
   const [pharmacistSearch, setPharmacistSearch] = useState("");
@@ -387,6 +425,36 @@ export function RotaView() {
   }, [selectedMonday]);
 
   // Modified regeneration function to accept state override
+  // Handle publishing the rota
+  const handlePublishRota = async () => {
+    setIsPublishing(true);
+    try {
+      // Get the IDs for all rotas in the current week
+      const rotaIds = Object.values(rotaIdsByDate);
+      if (rotaIds.length === 0) {
+        alert("No rotas to publish");
+        return;
+      }
+      
+      // Publish rotas one by one, passing the actual user name from state
+      await Promise.all(rotaIds.map((rotaId) => {
+        // Pass the user's name to be stored properly
+        return publishRota({ 
+          rotaId,
+          userName: currentUser.name || currentUser.email || 'Unknown User'
+        });
+      }));
+      
+      setPublishSuccess(true);
+      setTimeout(() => setPublishSuccess(false), 3000); // Clear success message after 3 seconds
+    } catch (error) {
+      console.error("Error publishing rota:", error);
+      alert(`Error publishing rota: ${error}`);
+    } finally {
+      setIsPublishing(false);
+    }
+  };
+
   async function handleGenerateWeeklyRota(overrideSinglePharmacistDays?: string[], regenerateRota?: boolean) {
     // Prevent concurrent runs
     if (generatingWeekly) {
@@ -1029,6 +1097,7 @@ export function RotaView() {
                                   
                                   setPharmacistWorkingDaysLogged(newObj);
                                 }}
+                                disabled={isViewOnly}
                               >
                                 {day}
                               </button>
@@ -1043,6 +1112,7 @@ export function RotaView() {
                               setSelectedPharmacistIds(ids => [...ids, pharmacist._id]);
                               setPharmacistSearch(''); // Clear search after adding
                             }}
+                            disabled={isViewOnly}
                           >
                             Add to Rota
                           </button>
@@ -1063,7 +1133,7 @@ export function RotaView() {
           </div>
           <button
             className="mt-4 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
-            disabled={selectedPharmacistIds.length === 0}
+            disabled={selectedPharmacistIds.length === 0 || isViewOnly}
             onClick={() => {
               setShowPharmacistSelection(false);
               handleGenerateWeeklyRota();
@@ -1075,8 +1145,31 @@ export function RotaView() {
       )}
       {rotaGenerated && (
         <div className="mt-10">
-          <h3 className="text-xl font-bold mb-4">Weekly Rota Table</h3>
-          
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="text-xl font-bold">Weekly Rota Table</h3>
+            <div className="flex items-center space-x-2">
+              {publishSuccess && (
+                <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded">
+                  Rota published successfully!
+                </span>
+              )}
+              <button
+                className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 flex items-center"
+                onClick={handlePublishRota}
+                disabled={isPublishing || isViewOnly}
+              >
+                {isPublishing ? (
+                  <>
+                    <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                      <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                      <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                    Publishing...
+                  </>
+                ) : "Publish Rota"}
+              </button>
+            </div>
+          </div>
           {/* Dispensary Mode Toggles */}
           <div className="mb-4">
             {[0,1,2,3,4].map((dayOffset: number) => {
@@ -1453,8 +1546,8 @@ export function RotaView() {
           </div>
         </div>
       )}
-      {/* Add the PharmacistSelectionModal */}
-      {showPharmacistSelection && selectedCell && (
+      {/* Add the PharmacistSelectionModal - only shown when not in view-only mode */}
+      {!isViewOnly && showPharmacistSelection && selectedCell && (
         <PharmacistSelectionModal
           isOpen={showPharmacistSelection}
           onClose={() => {

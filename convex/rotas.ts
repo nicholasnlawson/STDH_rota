@@ -3742,7 +3742,10 @@ export const getRota = query({
 });
 
 export const publishRota = mutation({
-  args: { rotaId: v.id("rotas") },
+  args: { 
+    rotaId: v.id("rotas"),
+    userName: v.optional(v.string())
+  },
   handler: async (ctx, args) => {
     // Get the rota to publish
     const rota = await ctx.db.get(args.rotaId);
@@ -3766,13 +3769,58 @@ export const publishRota = mutation({
       const rWeekStart = getWeekStartDate(r.date);
       return rWeekStart === weekStart;
     });
-    // Mark all as published
-    await Promise.all(rotasToPublish.map(r => ctx.db.patch(r._id, { status: "published" })));
+    
+    // Get identity for publication metadata
+    const identity = await ctx.auth.getUserIdentity();
+    
+    // Determine the user name to display
+    let userName;
+    
+    // First check if a userName was passed in explicitly from the client
+    if (args.userName) {
+      userName = args.userName;
+    } 
+    // Next try to get the user's name from their identity
+    else if (identity?.name) {
+      userName = identity.name;
+    }
+    // Fall back to using email if available 
+    else if (identity?.email) {
+      const email = identity.email;
+      // Try to extract a name from the email (before the @)
+      userName = email.split('@')[0];
+      // Convert formats like john.doe to John Doe
+      userName = userName
+        .split(/[._]/)
+        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+        .join(' ');
+    }
+    // Last resort - use a generic name
+    else {
+      userName = "User";
+    }
+    
+    // Get current timestamp for publication metadata
+    const now = new Date();
+    const publishedAt = now.toISOString(); // Store as ISO string to fix type error
+    const formattedDate = now.toLocaleDateString();
+    const formattedTime = now.toLocaleTimeString();
+    
+    // Mark all as published with metadata
+    await Promise.all(rotasToPublish.map(r => ctx.db.patch(r._id, { 
+      status: "published",
+      publishedBy: userName, // Just store the name, not the email/ID
+      publishedAt: publishedAt,
+      publishDate: formattedDate,
+      publishTime: formattedTime
+    })));
+    
     // Log assignments for each published rota
     for (const r of rotasToPublish) {
       const fullRota = await ctx.db.get(r._id);
       if (fullRota) {
         console.log(`[publishRota] Rota for date ${fullRota.date}: assignments count = ${Array.isArray(fullRota.assignments) ? fullRota.assignments.length : 0}`);
+        console.log(`[publishRota] Published by: ${userName} at ${formattedDate} ${formattedTime}`);
         if (Array.isArray(fullRota.assignments)) {
           fullRota.assignments.forEach((a: any, idx: number) => {
             console.log(`[publishRota]  Assignment #${idx + 1}:`, JSON.stringify(a));
@@ -3782,7 +3830,6 @@ export const publishRota = mutation({
     }
     return rotasToPublish.map(r => r._id);
   },
-
 });
 
 export const updateRotaAssignment = mutation({
@@ -3839,4 +3886,45 @@ export const updateRotaAssignment = mutation({
 
     return rotaId;
   }
+});
+
+export const archiveRotas = mutation({
+  args: { 
+    weekStartDate: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { weekStartDate } = args;
+    
+    // Helper to get Monday for a given date string
+    function getWeekStartDate(dateStr: string) {
+      const d = new Date(dateStr);
+      const day = d.getDay();
+      // 0=Sunday, 1=Monday, ...
+      const diff = (day === 0 ? -6 : 1) - day; // If Sunday, go back 6 days, else back to Monday
+      d.setDate(d.getDate() + diff);
+      return d.toISOString().split('T')[0];
+    }
+
+    // Get all rotas for the given week
+    const allRotas = await ctx.db.query("rotas").collect();
+    const weekRotas = allRotas.filter(r => {
+      if (!r.date) return false;
+      const rWeekStart = getWeekStartDate(r.date);
+      return rWeekStart === weekStartDate && r.status === "published";
+    });
+
+    if (weekRotas.length === 0) {
+      throw new Error("No published rotas found for the specified week");
+    }
+
+    // Archive all rotas for the week
+    await Promise.all(
+      weekRotas.map(rota => ctx.db.patch(rota._id, { status: "archived" }))
+    );
+
+    console.log(`[archiveRotas] Archived ${weekRotas.length} rotas for week starting ${weekStartDate}`);
+    
+    // Return the IDs of the archived rotas
+    return weekRotas.map(rota => rota._id);
+  },
 });
