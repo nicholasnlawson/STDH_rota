@@ -29,18 +29,23 @@ export const add = mutation({
     }))),
   },
   handler: async (ctx, args) => {
-    // If firstName/lastName are provided but displayName is not, 
-    // generate a default displayName to ensure the UI always has something to display
-    let argsWithDisplayName = { ...args };
+    // If firstName/lastName are provided, update both displayName and the legacy name field
+    let argsWithNames = { ...args };
     
-    if (args.firstName && args.lastName && !args.displayName) {
-      argsWithDisplayName.displayName = `${args.firstName} ${args.lastName.charAt(0)}.`;
+    if (args.firstName && args.lastName) {
+      // Set a full name in the legacy name field for search purposes
+      argsWithNames.name = `${args.firstName} ${args.lastName}`;
+      
+      // Only set displayName if it's not provided
+      if (!args.displayName) {
+        argsWithNames.displayName = `${args.firstName} ${args.lastName.charAt(0)}.`;
+      }
     } else if (!args.displayName) {
       // Fallback to the legacy name field if no displayName is provided
-      argsWithDisplayName.displayName = args.name;
+      argsWithNames.displayName = args.name;
     }
     
-    return await ctx.db.insert("pharmacists", argsWithDisplayName);
+    return await ctx.db.insert("pharmacists", argsWithNames);
   },
 });
 
@@ -92,15 +97,21 @@ export const update = mutation({
     const { id, ...fields } = args;
     
     // Similar logic to the add handler
-    let fieldsWithDisplayName = { ...fields };
+    let fieldsWithNames = { ...fields };
     
-    if (fields.firstName && fields.lastName && !fields.displayName) {
-      fieldsWithDisplayName.displayName = `${fields.firstName} ${fields.lastName.charAt(0)}.`;
+    if (fields.firstName && fields.lastName) {
+      // Set a full name in the legacy name field for search purposes
+      fieldsWithNames.name = `${fields.firstName} ${fields.lastName}`;
+      
+      // Only set displayName if it's not provided
+      if (!fields.displayName) {
+        fieldsWithNames.displayName = `${fields.firstName} ${fields.lastName.charAt(0)}.`;
+      }
     } else if (!fields.displayName) {
       // Fallback to the legacy name field if no displayName is provided
-      fieldsWithDisplayName.displayName = fields.name;
+      fieldsWithNames.displayName = fields.name;
     }
     
-    return await ctx.db.patch(id, fieldsWithDisplayName);
+    return await ctx.db.patch(id, fieldsWithNames);
   }
 });

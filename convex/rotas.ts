@@ -2901,6 +2901,23 @@ for (const p of unassignedNonDefault8a) {
         // Get all ward assignments
         const wardAssignments = assignments.filter(a => a.type === "ward");
         
+        // Group assignments by pharmacist to check for cross-directorate assignments
+        const pharmacistAssignments: Record<string, Array<{assignment: Assignment; ward: typeof activeWards[number]}>> = {};
+        
+        for (const assignment of wardAssignments) {
+          const ward = activeWards.find(w => w.name === assignment.location);
+          if (!ward || !ward.directorate) continue;
+          
+          if (!pharmacistAssignments[assignment.pharmacistId]) {
+            pharmacistAssignments[assignment.pharmacistId] = [];
+          }
+          
+          pharmacistAssignments[assignment.pharmacistId].push({
+            assignment,
+            ward
+          });
+        }
+        
         for (const assignment of wardAssignments) {
           const ward = activeWards.find(w => w.name === assignment.location);
           if (!ward || !ward.directorate) continue;
@@ -2923,6 +2940,17 @@ for (const p of unassignedNonDefault8a) {
           
           if (pharmacistsInSameDirectorate.length === 0) {
             console.log(`[generateRota] PASS 8: Skipping pharmacist on ${ward.name} as they are the only one in directorate ${ward.directorate}`);
+            continue;
+          }
+          
+          // Check if pharmacist has already been assigned to a different directorate
+          const pharmacistAllAssignments = pharmacistAssignments[assignment.pharmacistId] || [];
+          const hasOtherDirectorates = pharmacistAllAssignments.some(item => 
+            item.ward.directorate && item.ward.directorate !== ward.directorate
+          );
+          
+          if (hasOtherDirectorates) {
+            console.log(`[generateRota] PASS 8: Skipping pharmacist on ${ward.name} as they are already assigned to a different directorate`);
             continue;
           }
           
@@ -3114,6 +3142,26 @@ for (const p of unassignedNonDefault8a) {
           assignedWards: typeof activeWards[number][];
         };
         
+        // First, check all pharmacist assignments to make sure we don't split between directorates
+        const allPharmacistWards: Record<string, {ward: typeof activeWards[number], directorate: string}[]> = {};
+        
+        // Get all assignments for all pharmacists across all directorates
+        for (const assignment of assignments.filter(a => a.type === "ward")) {
+          const pharmacistId = assignment.pharmacistId;
+          const ward = activeWards.find(w => w.name === assignment.location);
+          
+          if (!ward || !ward.directorate) continue;
+          
+          if (!allPharmacistWards[pharmacistId]) {
+            allPharmacistWards[pharmacistId] = [];
+          }
+          
+          allPharmacistWards[pharmacistId].push({
+            ward,
+            directorate: ward.directorate
+          });
+        }
+        
         const pharmacistsInDirectorate: Record<string, PharmacistWithWards> = {};
         
         for (const assignment of assignmentsInDirectorate) {
@@ -3121,6 +3169,17 @@ for (const p of unassignedNonDefault8a) {
           const ward = activeWards.find(w => w.name === assignment.location);
           
           if (!pharmacist || !ward) continue;
+          
+          // Skip if pharmacist is already assigned to a different directorate
+          const pharmacistAssignments = allPharmacistWards[pharmacist._id] || [];
+          const hasOtherDirectorates = pharmacistAssignments.some(item => 
+            item.directorate !== directorate
+          );
+          
+          if (hasOtherDirectorates) {
+            console.log(`[generateRota] PASS 9: Skipping ${pharmacist.name} as they are already assigned to a different directorate`);
+            continue;
+          }
           
           if (!pharmacistsInDirectorate[pharmacist._id]) {
             pharmacistsInDirectorate[pharmacist._id] = {

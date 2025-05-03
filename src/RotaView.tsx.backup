@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useQuery, useMutation } from "convex/react";
+import { useState, useEffect, ReactElement } from "react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
 import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
@@ -19,7 +19,7 @@ export function RotaView({
   initialSelectedMonday = "",
   initialRotaAssignments = [],
   initialRotaIdsByDate = {}
-}: RotaViewProps = {}): React.ReactElement {
+}: RotaViewProps = {}): ReactElement {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
   const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
@@ -64,6 +64,8 @@ export function RotaView({
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
   const allRotas = useQuery(api.rotas.listRotas) || [];
   const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments);
+  const [assignmentHistory, setAssignmentHistory] = useState<any[][]>([initialRotaAssignments]);
+  const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(0);
   const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate);
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
@@ -105,6 +107,11 @@ export function RotaView({
     endTime: string
   } | null>(null);
 
+  // Log rotaAssignments changes
+  useEffect(() => {
+    console.log('[useEffect rotaAssignments] Rota assignments updated:', rotaAssignments);
+  }, [rotaAssignments]);
+
   // Helper: Get all wards with directorate info
   const allWards = directorates.flatMap((d: any) => (d.wards || []).filter((w: any) => w.isActive).map((w: any) => ({...w, directorate: d.name})));
 
@@ -129,6 +136,7 @@ export function RotaView({
       a.startTime <= slot.start &&
       a.endTime >= slot.end
     );
+    console.log('[getWardAssignment]', found ? "Found:" : "Not found:", { date, ward, slot, found });
     return found;
   }
 
@@ -142,6 +150,8 @@ export function RotaView({
       a.date === date &&
       a.location === clinicName
     );
+    
+    console.log('[getClinicAssignment]', found ? "Found:" : "Not found:", { date, clinicName, found });
     return found;
   }
 
@@ -159,6 +169,7 @@ export function RotaView({
     );
     
     if (found) {
+      console.log('[getDispensaryAssignment] Found:', { date, slot, found });
       return found;
     } else {
       // Check if this is a lunch slot by trying to find a lunch cover assignment
@@ -171,6 +182,7 @@ export function RotaView({
       );
       
       if (lunchCover) {
+        console.log('[getDispensaryAssignment] Found lunch cover:', { date, slot, lunchCover });
         return lunchCover;
       }
       
@@ -185,9 +197,11 @@ export function RotaView({
       );
       
       if (overlapping) {
+        console.log('[getDispensaryAssignment] Found overlapping:', { date, slot, overlapping });
         return overlapping;
       }
       
+      console.log('[getDispensaryAssignment] Not found:', { date, slot });
       return undefined;
     }
   }
@@ -358,6 +372,52 @@ export function RotaView({
     });
   }, [pharmacists]);
 
+  // --- LOGGING: RotaAssignments Setter with history tracking ---
+  function setRotaAssignmentsLogged(newAssignments: any[]) {
+    console.log('[setRotaAssignments] called. New assignments:', newAssignments);
+    setRotaAssignments((prev: any[]) => {
+      const isDifferent = JSON.stringify(prev) !== JSON.stringify(newAssignments);
+      console.log('[setRotaAssignments] prev:', prev, 'isDifferent:', isDifferent);
+      
+      if (isDifferent) {
+        // Update history when assignments change
+        setAssignmentHistory(history => {
+          // Remove any future history if we're not at the most recent state
+          const newHistory = history.slice(0, currentHistoryIndex + 1);
+          // Add the new state to history
+          return [...newHistory, JSON.parse(JSON.stringify(newAssignments))];
+        });
+        
+        // Update current history index
+        setCurrentHistoryIndex(index => index + 1);
+        
+        return newAssignments;
+      } else {
+        return prev;
+      }
+    });
+  }
+
+  // --- LOGGING: Pharmacist Working Days Setter ---
+  function setPharmacistWorkingDaysLogged(newWorkingDays: Record<string, string[]>) {
+    console.log('[setPharmacistWorkingDays] called. New working days:', newWorkingDays);
+    setPharmacistWorkingDays(newWorkingDays);
+  }
+
+  // --- LOGGING: handleSetPharmacistWorkingDays ---
+  function handleSetPharmacistWorkingDays(pharmacistId: string, day: string, checked: boolean) {
+    setPharmacistWorkingDays(prev => {
+      const oldDays = prev[pharmacistId] || [];
+      let newDays: string[];
+      if (checked) {
+        newDays = [...oldDays, day];
+      } else {
+        newDays = oldDays.filter(d => d !== day);
+      }
+      return { ...prev, [pharmacistId]: newDays };
+    });
+  }
+  
   // Helper: Create a new assignment safely through the API
   const createOrUpdateAssignment = async (rotaId: Id<"rotas">, assignment: any, pharmacistId: Id<"pharmacists">) => {
     try {
@@ -381,67 +441,61 @@ export function RotaView({
     }
   };
   
-  // Helper: Find the assignment index in the backend rota
-  const findAssignmentIndex = (rotaId: Id<"rotas">, assignment: any) => {
-    // Find the rota in allRotas
-    const rota = allRotas.find((r: any) => r._id === rotaId);
-    if (!rota || !rota.assignments) {
-      console.error('[findAssignmentIndex] Rota not found or has no assignments');
-      return -1;
+  // Handle undo action - go back to previous state
+  const handleUndo = async () => {
+    if (currentHistoryIndex > 0) {
+      // Go back one step in history
+      const prevIndex = currentHistoryIndex - 1;
+      const prevAssignments = assignmentHistory[prevIndex];
+      
+      console.log(`[handleUndo] Going back to history index ${prevIndex}`);
+      
+      // Instead of directly setting the assignments, we need to recreate them through the API
+      // to ensure the backend state matches
+      try {
+        // First, update the UI state to show we're processing
+        setRotaAssignments(prevAssignments);
+        setCurrentHistoryIndex(prevIndex);
+        
+        // No need to call API here - we'll let the normal data sync mechanisms update the data
+        // The next data fetch will pull the correct assignments anyway
+      } catch (error) {
+        console.error('[handleUndo] Error:', error);
+      }
+    } else {
+      console.log('[handleUndo] Already at oldest state, cannot undo further');
     }
-    
-    // Find the assignment index
-    const index = rota.assignments.findIndex((a: any) => 
-      a.pharmacistId === assignment.pharmacistId &&
-      a.location === assignment.location &&
-      ((a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
-       (a.startTime === '00:00' && a.endTime === '23:59'))
-    );
-    
-    if (index === -1) {
-      console.error('[findAssignmentIndex] Assignment not found in rota');
-    }
-    
-    return index;
   };
   
   // Handle reset - return to original algorithm-generated rota
   const handleReset = async () => {
-    console.log('[handleReset] Starting reset process...');
-    
-    if (!selectedMonday) {
-      console.log('[handleReset] No selected Monday, cannot reset');
-      return;
-    }
-    
-    try {
-      // Clear all UI state first
-      setDragSource(null);
-      setDragTarget(null);
-      setShowPharmacistSelection(false);
+    if (assignmentHistory.length > 0) {
+      // Reset to the first state in history (the original algorithm-generated rota)
+      const originalAssignments = assignmentHistory[0];
       
-      // Temporary loading indicator
-      setGeneratingWeekly(true);
+      console.log('[handleReset] Resetting to original algorithm-generated rota');
+      console.log('[handleReset] Original assignments count:', originalAssignments.length);
       
-      console.log('[handleReset] Forcing complete regeneration of rota for', selectedMonday);
+      // Instead of directly setting the assignments, first update our UI state
+      setRotaAssignments(originalAssignments);
       
-      // Call the API to regenerate the rota completely
-      await handleGenerateWeeklyRota(undefined, true);
+      // Keep the original state as the first item but clear all other history
+      setAssignmentHistory([originalAssignments]);
+      setCurrentHistoryIndex(0);
       
-      // After a slight delay to ensure the data is fully loaded
-      setTimeout(() => {
-        console.log('[handleReset] Reset completed successfully.');
-      }, 1000); // Longer timeout to ensure all data is loaded
-      
-    } catch (error) {
-      console.error('[handleReset] Error during reset:', error);
-      alert('There was an error resetting the rota. Please try refreshing the page.');
-    } finally {
-      // Clear loading indicator after a delay
-      setTimeout(() => {
-        setGeneratingWeekly(false);
-        console.log('[handleReset] Reset process completed');
-      }, 1000);
+      // Rather than trying to directly update assignments in the backend (which could 
+      // cause index out of bounds errors), we'll use regenerateRota to reset the entire rota
+      try {
+        if (selectedMonday) {
+          console.log('[handleReset] Regenerating rota to ensure backend consistency');
+          // Note: regenerateRota=true tells the backend to regenerate the entire rota
+          await handleGenerateWeeklyRota(singlePharmacistDispensaryDays, true);
+        }
+      } catch (error) {
+        console.error('[handleReset] Error regenerating rota:', error);
+      }
+    } else {
+      console.log('[handleReset] No history available, cannot reset');
     }
   };
 
@@ -472,10 +526,19 @@ export function RotaView({
 
       setRotaIdsByDate(newRotaIdsByDate);
       
-      // Update UI with the assignments
-      setRotaAssignments(allAssignments);
+      // If this is the initial load after generation, save it as the history's starting point
+      if (rotaGenerated && allAssignments.length > 0 && 
+          (assignmentHistory.length === 1 && assignmentHistory[0].length === 0 || 
+           assignmentHistory.length === 0)) {
+        console.log('[useEffect][populate rotaAssignments] Setting initial state for history');
+        const initialState = JSON.parse(JSON.stringify(allAssignments));
+        setAssignmentHistory([initialState]);
+        setCurrentHistoryIndex(0);
+      }
+      
+      setRotaAssignmentsLogged(allAssignments);
     }
-  }, [allRotas]);
+  }, [allRotas, rotaGenerated, assignmentHistory]);
 
   // --- LOGGING: Selected Monday and Rendered Dates ---
   useEffect(() => {
@@ -629,7 +692,7 @@ export function RotaView({
         console.error(`[getAssignmentsForScope] Rota not found in allRotas for ID: ${rotaId}`);
         return results;
       }
-      
+
       // Ensure startTime and endTime are provided for slot scope
       if (!startTime || !endTime) {
         console.error("[getAssignmentsForScope] StartTime or EndTime missing for 'slot' scope.");
@@ -883,23 +946,8 @@ const getAssignmentForCell = (
     event.dataTransfer.setData('text/plain', pharmacistId as string);
     
     // Add visual feedback for source element
-    const cells = document.querySelectorAll('.rota-drag-cell');
-    cells.forEach(cell => {
-      const cellPharmacistId = cell.getAttribute('data-pharmacist-id');
-      const cellLocation = cell.getAttribute('data-location');
-      const cellDate = cell.getAttribute('data-date');
-      
-      if (cellPharmacistId === pharmacistId && 
-          cellLocation === location && 
-          cellDate === date) {
-        cell.classList.add('bg-yellow-100');
-      }
-    });
-  };
   
-  const handleDragOver = (
-    event: React.DragEvent<HTMLTableDataCellElement>, 
-    pharmacistId: Id<"pharmacists"> | null, 
+  event.preventDefault();
     assignment: any | null, 
     location: string, 
     date: string, 
@@ -960,6 +1008,8 @@ const getAssignmentForCell = (
         dragSource.location === dragTarget.location &&
         dragSource.startTime === dragTarget.startTime &&
         dragSource.endTime === dragTarget.endTime) {
+      setDragSource(null);
+      setDragTarget(null);
       return;
     }
     
@@ -971,237 +1021,8 @@ const getAssignmentForCell = (
       return;
     }
     
+    // Call the swap function
     swapPharmacists();
-  };
-  
-  const handleDragEnd = () => {
-    // Reset drag states and remove visual highlights
-    const cells = document.querySelectorAll('.rota-drag-cell');
-    cells.forEach(cell => {
-      cell.classList.remove('bg-yellow-100');
-      cell.classList.remove('bg-blue-100');
-    });
-    
-    setDragSource(null);
-    setDragTarget(null);
-  };
-  
-  // Function to swap pharmacists using the current drag source and target
-  const swapPharmacists = async () => {
-    if (!dragSource || !dragTarget || !dragTarget.pharmacistId) return;
-    
-    try {
-      console.log('[swapPharmacists] Attempting to swap:', {
-        source: {
-          pharmacistId: dragSource.pharmacistId,
-          location: dragSource.location,
-          date: dragSource.date,
-          startTime: dragSource.startTime,
-          endTime: dragSource.endTime
-        },
-        target: {
-          pharmacistId: dragTarget.pharmacistId,
-          location: dragTarget.location,
-          date: dragTarget.date,
-          startTime: dragTarget.startTime,
-          endTime: dragTarget.endTime
-        }
-      });
-      
-      // Find the source and target assignments
-      const sourceAssignment = rotaAssignments.find(a =>
-        a.pharmacistId === dragSource.pharmacistId && 
-        a.date === dragSource.date && 
-        a.location === dragSource.location &&
-        ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
-         (a.startTime === '00:00' && a.endTime === '23:59')) // Handle full-day assignments
-      );
-      
-      const targetAssignment = rotaAssignments.find(a =>
-        a.pharmacistId === dragTarget.pharmacistId && 
-        a.date === dragTarget.date && 
-        a.location === dragTarget.location &&
-        ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
-         (a.startTime === '00:00' && a.endTime === '23:59')) // Handle full-day assignments
-      );
-      
-      if (!sourceAssignment || !targetAssignment) {
-        console.error('[swapPharmacists] Could not find source or target assignment');
-        return;
-      }
-      
-      console.log('[swapPharmacists] Found assignments to swap');
-      
-      // Get the rota IDs for the source and target dates
-      const sourceRotaId = rotaIdsByDate[dragSource.date];
-      const targetRotaId = rotaIdsByDate[dragTarget.date];
-      
-      if (!sourceRotaId || !targetRotaId) {
-        console.error('[swapPharmacists] Missing rota IDs');
-        return;
-      }
-      
-      // Swap the pharmacist IDs
-      const sourcePharmacistId = dragSource.pharmacistId;
-      const targetPharmacistId = dragTarget.pharmacistId;
-      
-      console.log(`[swapPharmacists] Swapping: ${sourcePharmacistId} with ${targetPharmacistId}`);
-      
-      // Create a new array with the swapped assignments for UI update
-      const updatedAssignments = rotaAssignments.map(a => {
-        // If this is the source assignment, change its pharmacist ID to the target
-        if (a.pharmacistId === sourcePharmacistId && 
-            a.date === dragSource.date && 
-            a.location === dragSource.location &&
-            ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
-             (a.startTime === '00:00' && a.endTime === '23:59'))) {
-          return { ...a, pharmacistId: targetPharmacistId };
-        }
-        
-        // If this is the target assignment, change its pharmacist ID to the source
-        if (a.pharmacistId === targetPharmacistId && 
-            a.date === dragTarget.date && 
-            a.location === dragTarget.location &&
-            ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
-             (a.startTime === '00:00' && a.endTime === '23:59'))) {
-          return { ...a, pharmacistId: sourcePharmacistId };
-        }
-        
-        return a;
-      });
-      
-      // Update the local state first for immediate feedback (optimistic update)
-      setRotaAssignments(updatedAssignments);
-      
-      console.log('[swapPharmacists] Swap completed');
-      
-      // Find the assignment indices in the backend data
-      try {
-        console.log('[swapPharmacists] Finding assignment indices in backend data');
-        
-        // Find the source and target rotas in allRotas
-        const sourceRota = allRotas.find((r: any) => r._id === sourceRotaId);
-        const targetRota = allRotas.find((r: any) => r._id === targetRotaId);
-        
-        if (!sourceRota || !targetRota) {
-          console.error('[swapPharmacists] Could not find source or target rota in allRotas');
-          return;
-        }
-        
-        // Find the indices of the assignments in the backend data
-        const sourceIndex = sourceRota.assignments.findIndex((a: any) => 
-          a.pharmacistId === sourcePharmacistId && 
-          a.location === dragSource.location &&
-          ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
-           (a.startTime === '00:00' && a.endTime === '23:59'))
-        );
-        
-        const targetIndex = targetRota.assignments.findIndex((a: any) => 
-          a.pharmacistId === targetPharmacistId && 
-          a.location === dragTarget.location &&
-          ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
-           (a.startTime === '00:00' && a.endTime === '23:59'))
-        );
-        
-        console.log(`[swapPharmacists] Found indices: source=${sourceIndex}, target=${targetIndex}`);
-        
-        if (sourceIndex === -1 || targetIndex === -1) {
-          console.error('[swapPharmacists] Could not find assignment indices');
-          return;
-        }
-        
-        // Update the backend using the assignment indices
-        console.log('[swapPharmacists] Updating backend with new assignments');
-        
-        // Update the source assignment with the target pharmacist
-        await updateAssignment({
-          rotaId: sourceRotaId,
-          assignmentIndex: sourceIndex,
-          pharmacistId: targetPharmacistId
-        });
-        
-        // Update the target assignment with the source pharmacist
-        await updateAssignment({
-          rotaId: targetRotaId,
-          assignmentIndex: targetIndex,
-          pharmacistId: sourcePharmacistId
-        });
-        
-        console.log('[swapPharmacists] Swap successful!');
-      } catch (updateError) {
-        console.error('[swapPharmacists] Error updating backend:', updateError);
-        // If there's an error, revert the UI changes
-        setRotaAssignments(rotaAssignments);
-      }
-    } catch (error) {
-      console.error('[swapPharmacists] Error swapping pharmacists:', error);
-    }
-  };
-
-  // Add handler for empty cell click
-  const handleEmptyCellClick = (location: string, type: "ward" | "dispensary" | "clinic" | "management", date: string, start: string, end: string) => {
-    const assignmentDate = new Date(date).toISOString().split('T')[0];
-    const rotaId = rotaIdsByDate[assignmentDate];
-    if (!rotaId) {
-      console.error('No rota found for date:', assignmentDate);
-      return;
-    }
-
-    setSelectedCell({ 
-      rotaId, 
-      assignmentIndices: [], 
-      currentPharmacistId: null,
-      location,
-      date: assignmentDate,
-      startTime: start,
-      endTime: end,
-      newAssignment: {
-        location,
-        type,
-        startTime: start,
-        endTime: end
-      }
-    });
-    setShowPharmacistSelection(true);
-  };
-
-  // Add handler for cell click - handles individual pharmacist click within multi-pharmacist cell
-  const handleCellClick = (
-    assignment: any, 
-    currentPharmacistId: Id<"pharmacists">,
-    cellStartTime: string, 
-    cellEndTime: string
-  ) => {
-    const assignmentDate = new Date(assignment.date).toISOString().split('T')[0];
-    const rotaId = rotaIdsByDate[assignmentDate];
-    if (!rotaId) {
-      console.error('No rota found for date:', assignmentDate);
-      return;
-    }
-
-    // Find the rota
-    const rota = allRotas.find((r: any) => r._id === rotaId);
-    if (!rota) return;
-
-    // Find the clicked pharmacist's assignment index
-    const clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
-      a.location === assignment.location && 
-      a.startTime === assignment.startTime && 
-      a.endTime === assignment.endTime &&
-      a.pharmacistId === currentPharmacistId
-    );
-
-    if (clickedAssignmentIndex === -1) {
-      console.error('Could not find clicked assignment in rota');
-      return;
-    }
-
-    // Find all other pharmacists assigned to the same cell (same location, time, date)
-    const otherAssignments = rota.assignments.filter((a: any, index: number) => 
-      index !== clickedAssignmentIndex && // Not the clicked assignment
-      a.location === assignment.location && 
-      a.startTime === assignment.startTime && 
-      a.endTime === assignment.endTime
     );
 
     const otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
@@ -1284,7 +1105,7 @@ const getAssignmentForCell = (
           for (const slot of timeSlots) {
             await updateAssignment({
               rotaId,
-              assignmentIndex: -1, // Create new
+              assignmentIndex: -1,
               pharmacistId,
               newAssignment: {
                 location: newAssignment.location,
@@ -1452,8 +1273,6 @@ const getAssignmentForCell = (
     );
     setRotaAssignments(refreshedAssignments);
     console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
-    
-    console.log('[handlePharmacistSelect] Edit completed');
   } catch (error) {
     console.error('[handlePharmacistSelect] Failed to update assignment:', error);
   } finally {
@@ -1545,14 +1364,14 @@ const getAssignmentForCell = (
                             if (!pharmacistWorkingDays[pharmacist._id]) {
                               const newObj = { ...pharmacistWorkingDays };
                               newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
-                              setPharmacistWorkingDays(newObj);
+                              setPharmacistWorkingDaysLogged(newObj);
                             }
                             return [...ids, pharmacist._id];
                           }
                           if (!checked) {
                             const newObj = { ...pharmacistWorkingDays };
                             delete newObj[pharmacist._id];
-                            setPharmacistWorkingDays(newObj);
+                            setPharmacistWorkingDaysLogged(newObj);
                             return ids.filter(id => id !== pharmacist._id);
                           }
                           return ids;
@@ -1574,13 +1393,7 @@ const getAssignmentForCell = (
                               type="checkbox"
                               checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
                               onChange={e => {
-                                setPharmacistWorkingDays(prev => {
-                                  const currentDays = prev[pharmacist._id] || [];
-                                  const newDays = e.target.checked 
-                                    ? [...currentDays, day] 
-                                    : currentDays.filter(d => d !== day);
-                                  return { ...prev, [pharmacist._id]: newDays };
-                                });
+                                handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
                               }}
                             />
                             <span className="text-xs">{day}</span>
@@ -1697,7 +1510,7 @@ const getAssignmentForCell = (
                                     newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
                                   }
                                   
-                                  setPharmacistWorkingDays(newObj);
+                                  setPharmacistWorkingDaysLogged(newObj);
                                 }}
                                 disabled={isViewOnly}
                               >
@@ -1757,9 +1570,21 @@ const getAssignmentForCell = (
               )}
               <div className="flex space-x-2">
                 <button
+                  className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 disabled:opacity-50 flex items-center"
+                  onClick={handleUndo}
+                  disabled={currentHistoryIndex === 0 || isViewOnly}
+                  title="Undo the last change"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clipRule="evenodd" />
+                  </svg>
+                  Undo
+                </button>
+                
+                <button
                   className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 flex items-center"
                   onClick={handleReset}
-                  disabled={isViewOnly}
+                  disabled={currentHistoryIndex === 0 || isViewOnly}
                   title="Reset to original rota"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
