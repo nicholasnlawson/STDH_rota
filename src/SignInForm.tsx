@@ -63,6 +63,7 @@ export function SignInForm() {
             onChange={(e) => setEmail(e.target.value)}
             placeholder="you@example.com" 
             required 
+            autoComplete="email"
           />
         </div>
         <div>
@@ -75,6 +76,7 @@ export function SignInForm() {
             onChange={(e) => setPassword(e.target.value)}
             placeholder="Password" 
             required 
+            autoComplete="current-password"
           />
         </div>
         <button 

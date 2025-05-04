@@ -35,13 +35,17 @@ interface RotaViewProps {
   initialSelectedMonday?: string;
   initialRotaAssignments?: any[];
   initialRotaIdsByDate?: Record<string, Id<"rotas">>;
+  publishedRota?: any; // Published rota data when editing a published rota
+  onEditsChanged?: (updates: { assignments?: any[], freeCellText?: Record<string, string> }) => void;
 }
 
 export function RotaView({
   isViewOnly = false,
   initialSelectedMonday = "",
   initialRotaAssignments = [],
-  initialRotaIdsByDate = {}
+  initialRotaIdsByDate = {},
+  publishedRota = null,
+  onEditsChanged
 }: RotaViewProps = {}): React.ReactElement {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
@@ -84,8 +88,15 @@ export function RotaView({
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
+  // Define all state variables needed for isDeselectedDay function upfront
   const [freeCellText, setFreeCellText] = useState<Record<string, string>>({});
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
+  const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate || {});
+  const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
+  
+  // Query to get all rotas - with appropriate filter based on view mode
+  const allRotas = useQuery(api.rotas.listRotas, { status: isViewOnly ? "published" : "draft" }) || [];
   
   // State for tracking dynamically added EAU rows
   const [eauAdditionalRows, setEauAdditionalRows] = useState<number[]>([]);
@@ -95,77 +106,71 @@ export function RotaView({
     setEauAdditionalRows(prev => [...prev, prev.length + 2]);
   }, []);
   
-  // Helper to check if a date corresponds to a deselected weekday
-  const isDeselectedDay = (date: Date): boolean => {
+  // Helper to check if a date corresponds to a deselected weekday - memoized to prevent infinite loops
+  const isDeselectedDay = useCallback((date: Date): boolean => {
     try {
       const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
       const dayLabel = dayLabels[date.getDay()];
-      console.log(`[isDeselectedDay] Checking day: ${dayLabel} (${date.toISOString()}), viewMode=${isViewOnly ? 'view' : 'edit'}`);
       
-      // When in view-only mode for a published rota, check the rota's includedWeekdays field
-      if (isViewOnly) {
-        // Find the corresponding rota for this date
-        const isoDate = date.toISOString().split('T')[0];
-        const rotaId = rotaIdsByDate[isoDate];
-        console.log(`[isDeselectedDay] Date ${isoDate} maps to rotaId: ${rotaId || 'none'}`);
-        
-        if (rotaId) {
-          const rota = allRotas.find((r: any) => r._id === rotaId);
-          console.log(`[isDeselectedDay] Found rota:`, rota ? JSON.stringify({
-            id: rota._id,
-            date: rota.date,
-            status: rota.status,
-            hasIncludedWeekdays: !!rota.includedWeekdays,
-            includedWeekdays: rota.includedWeekdays
-          }) : 'null');
-          
-          // First confirm this is a published rota
-          if (rota && rota.status === "published") {
-            // Check if this rota has explicit includedWeekdays data
-            if (rota.includedWeekdays && Array.isArray(rota.includedWeekdays)) {
-              // If this day wasn't included in the original rota generation, consider it deselected
-              const isDeselected = !rota.includedWeekdays.includes(dayLabel);
-              console.log(`[isDeselectedDay] Day ${dayLabel} isDeselected=${isDeselected} (included weekdays: ${rota.includedWeekdays.join(', ')})`); 
-              return isDeselected;
-            } else {
-              // If the published rota is missing includedWeekdays data, try to get it from the original rota
-              if (rota.originalRotaId) {
-                const originalRota = allRotas.find((r: any) => r._id === rota.originalRotaId);
-                if (originalRota && originalRota.includedWeekdays && Array.isArray(originalRota.includedWeekdays)) {
-                  const isDeselected = !originalRota.includedWeekdays.includes(dayLabel);
-                  console.log(`[isDeselectedDay] Using original rota: Day ${dayLabel} isDeselected=${isDeselected} (included weekdays: ${originalRota.includedWeekdays.join(', ')})`); 
-                  return isDeselected;
-                }
-              }
-              console.log(`[isDeselectedDay] Cannot determine if day is deselected - missing includedWeekdays data`);
-            }
-          } else {
-            console.log(`[isDeselectedDay] Rota is not published, status: ${rota?.status}`);
-          }
-        } else {
-          console.log(`[isDeselectedDay] Cannot find rotaId for date ${isoDate}`);
-          
-          // If we can't find a rota for this day but it's a weekend (Saturday or Sunday),
-          // it's likely that it should be deselected
-          if (dayLabel === "Saturday" || dayLabel === "Sunday") {
-            console.log(`[isDeselectedDay] No rota found for ${dayLabel}, treating as deselected`);
-            return true;
-          }
+      // Get the date in ISO format for lookups
+      const isoDate = date.toISOString().split('T')[0];
+      
+      // Find the corresponding rota for this date - needed in both view and edit mode
+      const rotaId = rotaIdsByDate ? rotaIdsByDate[isoDate] : null;
+      
+      // For published rotas in edit mode, we need special handling
+      if (!isViewOnly && publishedRota && publishedRota._id) {
+        // For dates that are within our published rota week, use the saved included weekdays
+        if (publishedRota.includedWeekdays && Array.isArray(publishedRota.includedWeekdays)) {
+          // If we're in edit mode for a published rota, we want to keep showing the same days
+          return !publishedRota.includedWeekdays.includes(dayLabel);
         }
-        // Default to included if we can't determine definitively
-        return false;
+        
+        // Otherwise, use the current selection state
+        return selectedWeekdays.indexOf(dayLabel) === -1;
       }
       
+      // For a specific rota (published or not), try to use its included weekdays
+      if (rotaId) {
+        const rota = allRotas.find((r: any) => r._id === rotaId);
+        if (rota) {
+          // If this rota has includedWeekdays data, use it
+          if (rota.includedWeekdays && Array.isArray(rota.includedWeekdays)) {
+            return !rota.includedWeekdays.includes(dayLabel);
+          }
+          // If the rota is missing includedWeekdays data, try to get it from the original rota
+          else if (rota.originalRotaId) {
+            const originalRota = allRotas.find((r: any) => r._id === rota.originalRotaId);
+            if (originalRota && originalRota.includedWeekdays && Array.isArray(originalRota.includedWeekdays)) {
+              return !originalRota.includedWeekdays.includes(dayLabel);
+            }
+          }
+        }
+      } else {
+        // If we can't find a rota for this day but it's a weekend (Saturday or Sunday),
+        // it's likely that it should be deselected
+        if (dayLabel === "Saturday" || dayLabel === "Sunday") {
+          return true;
+        }
+      }
+      
+      // If we haven't been able to determine from a published rota:
       // In edit mode, use the current selectedWeekdays state
-      const isDeselected = selectedWeekdays.indexOf(dayLabel) === -1;
-      console.log(`[isDeselectedDay] Edit mode: ${dayLabel} isDeselected=${isDeselected}, selectedWeekdays=${selectedWeekdays.join(', ')}`);
-      return isDeselected;
+      // In view mode, default to included (weekdays) or excluded (weekends)
+      if (!isViewOnly) {
+        return selectedWeekdays.indexOf(dayLabel) === -1;
+      } else {
+        // Default weekday selection for view mode if no published rota data available
+        return (dayLabel === "Saturday" || dayLabel === "Sunday");
+      }
     } catch (error) {
       console.error('[isDeselectedDay] Error determining if day is deselected:', error);
       return false; // Default to included if there's an error
     }
-  };
-
+  // We're explicitly NOT including rotaIdsByDate in the dependency array
+  // to prevent infinite loops when the function is used in effects that update rotaIdsByDate
+  }, [isViewOnly, publishedRota, selectedWeekdays]);
+  
   // Add the custom CSS styles to the document
   useEffect(() => {
     // Add style tag if it doesn't exist
@@ -224,10 +229,19 @@ export function RotaView({
       
       // Update free text in state
       if (input.value !== currentValue) {
+        const updatedFreeCellText = {
+          [cellKey]: input.value
+        };
+        
         setFreeCellText(prev => ({
           ...prev,
-          [cellKey]: input.value
+          ...updatedFreeCellText
         }));
+        
+        // If in edit mode of published rota, notify parent about changes
+        if (!isViewOnly && onEditsChanged) {
+          onEditsChanged({ freeCellText: updatedFreeCellText });
+        }
       }
     });
     
@@ -240,18 +254,15 @@ export function RotaView({
   };
 
   // In edit mode, we only want to see draft rotas
-  // In view mode, we want to see published rotas
-  const allRotas = useQuery(api.rotas.listRotas, { status: isViewOnly ? "published" : "draft" }) || [];
-  const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments);
-  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate);
+  // These state variables have been moved to the top of the component
+  // to avoid circular dependencies with isDeselectedDay function
   // Track ad-hoc unavailable rules added during rota generation
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
   
   // Track which permanent unavailable rules to ignore (when user deselects them)
   const [ignoredUnavailableRules, setIgnoredUnavailableRules] = useState<Record<string, number[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
-  // State to track selected weekdays for rota generation (default all days selected)
-  const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+  // Weekdays are now defined at the top of the component
   const [bankHolidays, setBankHolidays] = useState<BankHoliday[]>([]);
   const [bankHolidayDates, setBankHolidayDates] = useState<Record<string, string>>({});
   const [pharmacistSearch, setPharmacistSearch] = useState("");
@@ -673,36 +684,57 @@ export function RotaView({
       setDragTarget(null);
       setShowPharmacistSelection(false);
       
-      // Clear any free text entries in special rows
-      setFreeCellText({});
-      
-      // Clear any dynamically added EAU rows
-      setEauAdditionalRows([]);
-      
-      // Reset any ignored unavailable rules
-      setIgnoredUnavailableRules({});
-      
-      // Reset any ad-hoc unavailable rules
-      setRotaUnavailableRules({});
-      
-      // Temporary loading indicator
+      // Set loading indicator
       setGeneratingWeekly(true);
       
-      console.log('[handleReset] Forcing complete regeneration of rota for', selectedMonday);
+      console.log('[handleReset] Handling reset for rota with selectedMonday:', selectedMonday);
       
-      // Call the API to regenerate the rota completely
-      await handleGenerateWeeklyRota(undefined, true);
+      // Handle reset differently based on whether we're editing a published rota
+      if (publishedRota && !isViewOnly && initialRotaAssignments && initialRotaIdsByDate) {
+        // For published rotas in edit mode, simply restore to the initial data without regenerating
+        console.log('[handleReset] Editing published rota - restoring original assignments');
+        
+        // First clear temporary changes
+        setEauAdditionalRows([]);
+        setIgnoredUnavailableRules({});
+        setRotaUnavailableRules({});
+        setFreeCellText({});
+        
+        // Restore original assignments
+        setRotaIdsByDate(initialRotaIdsByDate);
+        setRotaAssignments(initialRotaAssignments);
+        
+        // Notify parent component to ensure published rota connection is maintained
+        if (onEditsChanged) {
+          onEditsChanged({
+            assignments: initialRotaAssignments,
+            freeCellText: {}
+          });
+        }
+        
+        console.log('[handleReset] Reset to initial published rota assignments complete');
+      } else {
+        // For normal rotas (not editing published), regenerate completely
+        console.log('[handleReset] Standard reset - regenerating rota');
+        
+        // Clear modifications
+        setEauAdditionalRows([]);
+        setIgnoredUnavailableRules({});
+        setRotaUnavailableRules({});
+        setFreeCellText({});
+        
+        // Call the API to regenerate the rota completely
+        await handleGenerateWeeklyRota(undefined, true);
+      }
       
-      // After a slight delay to ensure the data is fully loaded
       setTimeout(() => {
         console.log('[handleReset] Reset completed successfully.');
-      }, 1000); // Longer timeout to ensure all data is loaded
+      }, 500);
       
     } catch (error) {
       console.error('[handleReset] Error during reset:', error);
       alert('There was an error resetting the rota. Please try refreshing the page.');
     } finally {
-      // Clear loading indicator after a delay
       setTimeout(() => {
         setGeneratingWeekly(false);
         console.log('[handleReset] Reset process completed');
@@ -710,9 +742,37 @@ export function RotaView({
     }
   };
 
-  // --- LOGGING: RotaAssignments Population Effect ---
+  // useEffect to populate rotaAssignments from allRotas for display or from initialRotaAssignments for editing
   useEffect(() => {
-    console.log('[useEffect][populate rotaAssignments] allRotas changed. Finding new assignments...');
+    console.log('[useEffect][populate rotaAssignments] Dependencies changed. Finding new assignments...');
+    
+    // Handle special case: when we're showing published rotas in edit mode,
+    // we should maintain the initialRotaAssignments and not recompute from allRotas
+    if (initialRotaAssignments && initialRotaAssignments.length > 0 && initialRotaIdsByDate && !isViewOnly) {
+      console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
+      // Set state in one batch to avoid flicker
+      setRotaIdsByDate(initialRotaIdsByDate);
+      setRotaAssignments(initialRotaAssignments);
+      return;
+    }
+    
+    // Always prioritize initialRotaAssignments when in edit mode - this prevents table from disappearing
+    if (!isViewOnly && initialRotaAssignments && initialRotaAssignments.length > 0) {
+      console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
+      // We do this check even if we already have rotaAssignments to ensure consistent state
+      if (initialRotaIdsByDate) {
+        setRotaIdsByDate(initialRotaIdsByDate);
+      }
+      setRotaAssignments(initialRotaAssignments);
+      return;
+    }
+    
+    // Don't clear existing assignments before we have new ones ready
+    if (rotaAssignments.length > 0 && allRotas.length === 0) {
+      console.log('[populate rotaAssignments] Preserving existing assignments');
+      return;
+    }
+    
     if (allRotas.length > 0) {
       // Create a map of date to rota ID
       const newRotaIdsByDate: Record<string, Id<"rotas">> = {};
@@ -732,14 +792,15 @@ export function RotaView({
         const dayOfWeek = dateObj.getDay(); // 0 = Sunday, 1 = Monday, etc.
         const dayLabel = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dayOfWeek];
         
-        // Check if this day was included when the rota was generated
+        // Check if this day should be included
+        // Special behavior for edit mode on published rotas - use selectedWeekdays
+        let isDayIncluded = true;
+        
         // Create a date object to check if day is deselected
         const dayDate = new Date(dateStr);
         // Use our isDeselectedDay function for consistent behavior with the UI
         const isDeselected = isDeselectedDay(dayDate);
-        const isDayIncluded = !isDeselected;
-        
-        console.log(`[populate rotaAssignments] Rota ${rota._id} date ${dateStr} (${dayLabel}): included=${isDayIncluded}, deselected=${isDeselected}`);
+        isDayIncluded = !isDeselected;
         
         // Always store the mapping between dates and rota IDs, even for deselected days
         // This is needed for the isDeselectedDay function to work correctly
@@ -747,7 +808,6 @@ export function RotaView({
         
         // Process free cell text if present (even for deselected days)
         if (rota.freeCellText && typeof rota.freeCellText === 'object') {
-          console.log(`[populate rotaAssignments] Found free cell text for rota ${rota._id}:`, rota.freeCellText);
           // Merge into our combined state
           Object.entries(rota.freeCellText).forEach(([key, value]) => {
             allFreeCellText[key] = value;
@@ -762,10 +822,6 @@ export function RotaView({
             date: dateStr
           }));
           allAssignments.push(...assignmentsWithDate);
-          console.log(`[populate rotaAssignments] Added ${assignmentsWithDate.length} assignments for ${dateStr}`);
-        } else if (!isDayIncluded) {
-          console.log(`[populate rotaAssignments] Skipping assignments for ${dateStr} - day was deselected`);
-          // For deselected days we still keep rotaId mapping for proper lookup in isDeselectedDay
         }
       }
 
@@ -775,9 +831,11 @@ export function RotaView({
       setRotaAssignments(allAssignments);
       setFreeCellText(allFreeCellText); // Use the free cell text from rotas
       console.log(`[populate rotaAssignments] Total assignments loaded: ${allAssignments.length}`);
-      console.log(`[populate rotaAssignments] Free cell text entries loaded: ${Object.keys(allFreeCellText).length}`);
     }
-  }, [allRotas]);
+  // We're explicitly NOT including rotaIdsByDate and rotaAssignments in the dependency array
+  // to prevent infinite loops, as we update them in the effect
+  // isViewOnly change is handled specially to ensure table never disappears
+  }, [allRotas, initialRotaAssignments, initialRotaIdsByDate, isViewOnly]);
 
   // --- LOGGING: Selected Monday and Rendered Dates ---
   useEffect(() => {
@@ -794,7 +852,8 @@ export function RotaView({
   useEffect(() => {
     if (isViewOnly) return;
     
-    setRotaAssignments([]);
+    // Don't clear assignments until we have new ones
+    // Only set rotaGenerated to false to indicate we need a new generation
     setRotaGenerated(false);
     
     // Detect bank holidays for the selected week
@@ -1595,34 +1654,55 @@ const getAssignmentForCell = (
       return;
     }
 
-    // Find the rota
-    const rota = allRotas.find((r: any) => r._id === rotaId);
-    if (!rota) return;
-
-    // Find the clicked pharmacist's assignment index
-    const clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
-      a.location === assignment.location && 
-      a.startTime === assignment.startTime && 
-      a.endTime === assignment.endTime &&
-      a.pharmacistId === currentPharmacistId
-    );
-
-    if (clickedAssignmentIndex === -1) {
-      console.error('Could not find clicked assignment in rota');
-      return;
-    }
-
-    // Find all other pharmacists assigned to the same cell (same location, time, date)
-    const otherAssignments = rota.assignments.filter((a: any, index: number) => 
-      index !== clickedAssignmentIndex && // Not the clicked assignment
-      a.location === assignment.location && 
-      a.startTime === assignment.startTime && 
-      a.endTime === assignment.endTime
-    );
-
-    const otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
+    // In edit mode, we might not have the rota in allRotas, so we'll work with rotaAssignments directly
+    let clickedAssignmentIndex = -1;
+    let otherPharmacistIds: Id<"pharmacists">[] = [];
     
-    console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId} at index ${clickedAssignmentIndex}`);
+    // Try to find the rota in allRotas first
+    const rota = allRotas.find((r: any) => r._id === rotaId);
+    
+    if (rota && rota.assignments) {
+      // Regular mode: Find the clicked pharmacist's assignment index
+      clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
+        a.location === assignment.location && 
+        a.startTime === assignment.startTime && 
+        a.endTime === assignment.endTime &&
+        a.pharmacistId === currentPharmacistId
+      );
+
+      // Find all other pharmacists assigned to the same cell (same location, time, date)
+      if (clickedAssignmentIndex !== -1) {
+        const otherAssignments = rota.assignments.filter((a: any, index: number) => 
+          index !== clickedAssignmentIndex && // Not the clicked assignment
+          a.location === assignment.location && 
+          a.startTime === assignment.startTime && 
+          a.endTime === assignment.endTime
+        );
+
+        otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
+      }
+    } 
+  
+    // If we couldn't find in allRotas or clickedAssignmentIndex is -1, try rotaAssignments (edit mode)
+    if (clickedAssignmentIndex === -1) {
+      // Find other pharmacists assigned to the same cell from rotaAssignments
+      const sameSlotAssignments = rotaAssignments.filter(a => 
+        a.date === assignmentDate &&
+        a.location === assignment.location && 
+        ((a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
+         (a.start === assignment.start && a.end === assignment.end))
+      );
+      
+      // Set a dummy index for edit mode
+      clickedAssignmentIndex = 0;
+      
+      // Get other pharmacist IDs excluding the current one
+      otherPharmacistIds = sameSlotAssignments
+        .filter(a => a.pharmacistId !== currentPharmacistId)
+        .map(a => a.pharmacistId);
+    }
+    
+    console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId}`);
     console.log(`[handleCellClick] Other pharmacists in this cell: ${otherPharmacistIds.length > 0 ? otherPharmacistIds.join(', ') : 'none'}`);
 
     // Store both the selected pharmacist and other pharmacists in the cell
@@ -1632,8 +1712,8 @@ const getAssignmentForCell = (
       currentPharmacistId,
       location: assignment.location,
       date: assignmentDate,
-      startTime: cellStartTime,
-      endTime: cellEndTime,
+      startTime: cellStartTime || assignment.startTime,
+      endTime: cellEndTime || assignment.endTime,
       otherPharmacistIds // Keep track of other pharmacists in the same cell
     });
     setShowPharmacistSelection(true);
@@ -1916,6 +1996,18 @@ const getAssignmentForCell = (
     setRotaAssignments(refreshedAssignments);
     console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
     
+    // If in edit mode of published rota and we have a callback, notify parent about changes
+    if (!isViewOnly && onEditsChanged) {
+      // Create a record of what changed for the parent component
+      const assignmentUpdate = {
+        rotaId: selectedCell.rotaId,
+        assignmentIndex: selectedCell.assignmentIndices[0] ?? -1,
+        pharmacistId,
+        newAssignment: selectedCell.newAssignment
+      };
+      onEditsChanged({ assignments: [assignmentUpdate] });
+    }
+    
     console.log('[handlePharmacistSelect] Edit completed');
   } catch (error) {
     console.error('[handlePharmacistSelect] Failed to update assignment:', error);
@@ -1928,7 +2020,7 @@ const getAssignmentForCell = (
 };
 
   return (
-    <div className="bg-white rounded-lg shadow p-6">
+    <div className={`mt-4 ${isViewOnly ? 'p-0' : 'p-4'}`}>
       <div className="flex gap-4 mt-6">
         <div>
           <label className="block font-medium mb-1">Select Monday (week start)</label>
@@ -2265,7 +2357,7 @@ const getAssignmentForCell = (
           </button>
         </div>
       )}
-      {rotaGenerated && (
+      {(rotaGenerated || (rotaAssignments.length > 0 && selectedMonday)) && (
         <div className="mt-10">
           <div className="flex justify-between items-center mb-4">
             <h3 className="text-xl font-bold">Weekly Rota Table</h3>
@@ -2320,8 +2412,11 @@ const getAssignmentForCell = (
           </div>
           {/* Dispensary Mode Toggles */}
           <div className="mb-4">
-            {[0,1,2,3,4].map((dayOffset: number) => {
+            {selectedMonday && [0,1,2,3,4].map((dayOffset: number) => {
+              // Ensure selectedMonday is valid before creating date objects
               const date = new Date(selectedMonday);
+              if (isNaN(date.getTime())) return null; // Skip if date is invalid
+              
               date.setDate(date.getDate() + dayOffset);
               const isoDate = date.toISOString().split('T')[0];
               
@@ -2383,8 +2478,8 @@ const getAssignmentForCell = (
             })}
           </div>
           
-          <div className="overflow-x-auto w-full max-w-full">
-            <table className="border text-xs md:text-sm table-fixed w-full">
+          <div className={`${isViewOnly ? 'w-screen pr-8' : 'overflow-x-auto w-full'}`}>
+            <table className="w-full border border-gray-300 mb-4" style={{ tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '120px' }} />
                 <col style={{ width: '120px' }} />
