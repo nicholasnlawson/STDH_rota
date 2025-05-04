@@ -17,6 +17,7 @@ import type * as auth from "../auth.js";
 import type * as clinics from "../clinics.js";
 import type * as dispensary from "../dispensary.js";
 import type * as http from "../http.js";
+import type * as migratePharmacists from "../migratePharmacists.js";
 import type * as pharmacists from "../pharmacists.js";
 import type * as requirements from "../requirements.js";
 import type * as rotas from "../rotas.js";
@@ -34,6 +35,7 @@ declare const fullApi: ApiFromModules<{
   clinics: typeof clinics;
   dispensary: typeof dispensary;
   http: typeof http;
+  migratePharmacists: typeof migratePharmacists;
   pharmacists: typeof pharmacists;
   requirements: typeof requirements;
   rotas: typeof rotas;

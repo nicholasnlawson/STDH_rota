@@ -3,13 +3,12 @@ import { v } from "convex/values";
 
 export const add = mutation({
   args: {
-    // Legacy field - keeping for backward compatibility
-    name: v.string(),
-    // New name fields
-    firstName: v.optional(v.string()),
-    lastName: v.optional(v.string()),
+    name: v.string(), // Full name
     displayName: v.optional(v.string()), // "Appears in rota as"
-    email: v.string(),
+    email: v.optional(v.string()),
+    // Temporarily accept firstName and lastName during migration
+    firstName: v.optional(v.string()),
+    lastName: v.optional(v.string()),    
     band: v.string(),
     primaryDirectorate: v.string(),
     warfarinTrained: v.boolean(),
@@ -29,23 +28,16 @@ export const add = mutation({
     }))),
   },
   handler: async (ctx, args) => {
-    // If firstName/lastName are provided, update both displayName and the legacy name field
-    let argsWithNames = { ...args };
+    // Extract firstName and lastName if they exist, to exclude them from the database insert
+    const { firstName, lastName, ...fieldsToInsert } = args;
     
-    if (args.firstName && args.lastName) {
-      // Set a full name in the legacy name field for search purposes
-      argsWithNames.name = `${args.firstName} ${args.lastName}`;
-      
-      // Only set displayName if it's not provided
-      if (!args.displayName) {
-        argsWithNames.displayName = `${args.firstName} ${args.lastName.charAt(0)}.`;
-      }
-    } else if (!args.displayName) {
-      // Fallback to the legacy name field if no displayName is provided
-      argsWithNames.displayName = args.name;
-    }
+    // Make sure displayName has a value if not provided
+    const fieldsWithDefaults = {
+      ...fieldsToInsert,
+      displayName: fieldsToInsert.displayName || fieldsToInsert.name
+    };
     
-    return await ctx.db.insert("pharmacists", argsWithNames);
+    return await ctx.db.insert("pharmacists", fieldsWithDefaults);
   },
 });
 
@@ -68,13 +60,12 @@ export const remove = mutation({
 export const update = mutation({
   args: {
     id: v.id("pharmacists"),
-    // Legacy field - keeping for backward compatibility
-    name: v.string(),
-    // New name fields
+    name: v.string(), // Full name
+    displayName: v.optional(v.string()), // "Appears in rota as"
+    email: v.optional(v.string()),
+    // Temporarily accept firstName and lastName during migration
     firstName: v.optional(v.string()),
     lastName: v.optional(v.string()),
-    displayName: v.optional(v.string()), // "Appears in rota as"
-    email: v.string(),
     band: v.string(),
     primaryDirectorate: v.string(),
     warfarinTrained: v.boolean(),
@@ -94,24 +85,8 @@ export const update = mutation({
     }))),
   },
   handler: async (ctx, args) => {
-    const { id, ...fields } = args;
-    
-    // Similar logic to the add handler
-    let fieldsWithNames = { ...fields };
-    
-    if (fields.firstName && fields.lastName) {
-      // Set a full name in the legacy name field for search purposes
-      fieldsWithNames.name = `${fields.firstName} ${fields.lastName}`;
-      
-      // Only set displayName if it's not provided
-      if (!fields.displayName) {
-        fieldsWithNames.displayName = `${fields.firstName} ${fields.lastName.charAt(0)}.`;
-      }
-    } else if (!fields.displayName) {
-      // Fallback to the legacy name field if no displayName is provided
-      fieldsWithNames.displayName = fields.name;
-    }
-    
-    return await ctx.db.patch(id, fieldsWithNames);
-  }
+    const { id, firstName, lastName, ...fields } = args;
+    // If we have firstName and lastName as inputs, we'll exclude them from the update
+    await ctx.db.patch(id, fields);
+  },
 });

@@ -3,6 +3,7 @@ import { PharmacistList } from "./PharmacistList";
 import { RequirementsList } from "./RequirementsList";
 import { ClinicList } from "./ClinicList";
 import { RotaView } from "./RotaView";
+import { AdminPage } from "./AdminPage";
 import { PublishedRotasList } from "./PublishedRotasList";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
@@ -15,7 +16,7 @@ interface HomeProps {
 }
 
 export default function Home({ isAdmin, userEmail }: HomeProps) {
-  const [view, setView] = useState<"pharmacists" | "requirements" | "rota" | "profile" | "publishedRotas" | null>(null);
+  const [view, setView] = useState<"pharmacists" | "requirements" | "rota" | "profile" | "publishedRotas" | "admin" | null>(null);
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const currentPharmacist = pharmacists.find(p => p.email === userEmail);
 
@@ -67,6 +68,15 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
             >
               My Profile
             </button>
+            {/* Admin tab for admin users */}
+            {isAdmin && (
+              <button
+                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-red-600 text-white hover:bg-red-700 ${view === "admin" ? "ring-4 ring-red-300" : ""}`}
+                onClick={() => setView("admin")}
+              >
+                Admin
+              </button>
+            )}
           </div>
 
           {view === "pharmacists" && isAdmin && <PharmacistList />}
@@ -84,7 +94,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
               workingDays: currentPharmacist.workingDays ?? [],
             }} />
           )}
-
+          {view === "admin" && isAdmin && <AdminPage />}
           {!view && (
             <div className="text-gray-600 text-lg mt-10">
               Select an option above to get started.

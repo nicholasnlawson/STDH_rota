@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useQuery, useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
-import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
 import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
+import { isEnglishBankHoliday, getBankHolidaysInRange, BankHoliday } from './bankHolidays';
 
 /* Custom CSS for Not Selected overlays */
 const notSelectedStyles = `
@@ -252,8 +252,9 @@ export function RotaView({
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
   // State to track selected weekdays for rota generation (default all days selected)
   const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
-  const [bankHolidays, setBankHolidays] = useState<BankHoliday[]>([]);
-  const [bankHolidayDates, setBankHolidayDates] = useState<Record<string, string>>({});
+  
+  // State to track identified bank holidays in the selected week
+  const [bankHolidays, setBankHolidays] = useState<Record<string, BankHoliday>>({});
   const [pharmacistSearch, setPharmacistSearch] = useState("");
   const [selectedCell, setSelectedCell] = useState<{
     rotaId: Id<"rotas">,
@@ -779,56 +780,77 @@ export function RotaView({
     }
   }, [allRotas]);
 
-  // --- LOGGING: Selected Monday and Rendered Dates ---
+  // --- Handle date selection: detect bank holidays and update rendered dates ---
   useEffect(() => {
     if (!selectedMonday) return;
-    const dates = Array.from({ length: 5 }, (v: undefined, i: number) => {
+    
+    // Generate all dates in the week (Monday to Sunday)
+    const weekDates = Array.from({ length: 7 }, (v: undefined, i: number) => {
       const d = new Date(selectedMonday);
       d.setDate(d.getDate() + i);
-      return d.toISOString().split('T')[0];
+      return d;
     });
-    console.log('[RotaView] selectedMonday:', selectedMonday, 'Rendered dates:', dates);
-  }, [selectedMonday]);
+    
+    // Convert to ISO strings for logging
+    const dateStrings = weekDates.map(d => d.toISOString().split('T')[0]);
+    console.log('[RotaView] selectedMonday:', selectedMonday, 'Rendered dates:', dateStrings);
+    
+    // Skip bank holiday detection in view-only mode
+    if (isViewOnly) return;
+    
+    // Get the Monday and Sunday dates for the range
+    const mondayDate = new Date(selectedMonday);
+    const sundayDate = weekDates[6];
+    
+    // Detect bank holidays in the date range
+    const holidaysInWeek = getBankHolidaysInRange(mondayDate, sundayDate);
+    console.log('[Bank Holidays] Detected holidays in week:', holidaysInWeek.map(h => `${h.date.toISOString().split('T')[0]} - ${h.name}`));
+    
+    // Map holidays to their date strings for easy lookup
+    const holidayMap: Record<string, BankHoliday> = {};
+    for (const holiday of holidaysInWeek) {
+      const dateStr = holiday.date.toISOString().split('T')[0];
+      holidayMap[dateStr] = holiday;
+    }
+    setBankHolidays(holidayMap);
+    
+    // Auto-deselect bank holidays
+    if (holidaysInWeek.length > 0) {
+      // Create a map of dates to weekday names
+      const dateToWeekday: Record<string, string> = {};
+      weekDates.forEach(date => {
+        const dateStr = date.toISOString().split('T')[0];
+        const dayName = DAYS[date.getDay()];
+        dateToWeekday[dateStr] = dayName;
+      });
+      
+      // Update selected weekdays - remove any that are bank holidays
+      setSelectedWeekdays(prev => {
+        // Start with all previously selected weekdays
+        const updatedWeekdays = [...prev];
+        
+        // Remove any weekday that corresponds to a bank holiday
+        for (const holiday of holidaysInWeek) {
+          const dateStr = holiday.date.toISOString().split('T')[0];
+          const dayName = dateToWeekday[dateStr];
+          
+          // Only deselect if this day was previously selected
+          const index = updatedWeekdays.indexOf(dayName);
+          if (index !== -1) {
+            updatedWeekdays.splice(index, 1);
+            console.log(`[Bank Holidays] Auto-deselected ${dayName} (${holiday.name})`);
+          }
+        }
+        
+        return updatedWeekdays;
+      });
+    }
+  }, [selectedMonday, isViewOnly]);
 
   // Reset singlePharmacistDispensaryDays when selectedMonday changes
   useEffect(() => {
-    if (isViewOnly) return;
-    
-    setRotaAssignments([]);
-    setRotaGenerated(false);
-    
-    // Detect bank holidays for the selected week
-    if (selectedMonday) {
-      const startDate = new Date(selectedMonday);
-      const endDate = new Date(selectedMonday);
-      endDate.setDate(startDate.getDate() + 6); // End of week (Sunday)
-      
-      const holidays = getBankHolidaysInRange(startDate, endDate);
-      setBankHolidays(holidays);
-      
-      // Create a mapping of date to holiday name
-      const holidayMap: Record<string, string> = {};
-      holidays.forEach(h => {
-        holidayMap[h.date] = h.title;
-      });
-      setBankHolidayDates(holidayMap);
-      
-      // Automatically deselect bank holidays
-      if (holidays.length > 0) {
-        // Map from ISO dates to weekday names
-        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
-        const holidayWeekdays = holidays.map(h => {
-          const date = new Date(h.date);
-          return dayNames[date.getDay()];
-        });
-        
-        // Update selected weekdays to exclude bank holidays
-        setSelectedWeekdays(prev => {
-          return prev.filter(day => !holidayWeekdays.includes(day));
-        });
-      }
-    }
-  }, [selectedMonday, isViewOnly]);
+    setSinglePharmacistDispensaryDays([]);
+  }, [selectedMonday]);
 
   // Reimplemented publish rota function that creates a carbon copy of weekly rotas
   const publishRota = useMutation(api.rotas.publishRota);
@@ -921,23 +943,34 @@ export function RotaView({
   };
 
   async function handleGenerateWeeklyRota(overrideSinglePharmacistDays?: string[], regenerateRota?: boolean) {
+    // Don't do anything if we're in view-only mode
+    if (isViewOnly) return;
+    
     // Prevent concurrent runs
     if (generatingWeekly) {
       console.warn('[handleGenerateWeeklyRota] Already generating, skipping concurrent call.');
       return;
     }
-    if (!selectedMonday) return;
+    if (!selectedMonday) {
+      alert('Please select a valid week');
+      return;
+    }
+    if (selectedPharmacistIds.length === 0) {
+      alert('Please select pharmacists for the rota');
+      return;
+    }
 
+    setRotaGenerated(false);
     setGeneratingWeekly(true); // Set generating flag BEFORE try block
-
-    // Determine which state to use for the generation
-    const daysToUse = overrideSinglePharmacistDays ?? singlePharmacistDispensaryDays;
-    console.log('[handleGenerateWeeklyRota] Using singlePharmacistDays:', daysToUse);
-
+    
     try {
-      console.log(`[handleGenerateWeeklyRota] About to call Convex mutation with startDate: ${selectedMonday}, daysToUse: ${JSON.stringify(daysToUse)}`);
-      // Create a structure for additional unavailable rules that combines ad-hoc rules
-      // with permanent rules that haven't been ignored
+      // Combine any overridden days with the existing state
+      const finalSinglePharmacistDays = [
+        ...singlePharmacistDispensaryDays,
+        ...(overrideSinglePharmacistDays || [])
+      ];
+      
+      // Determine which unavailable rules to use for each pharmacist
       const effectiveUnavailableRules: Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]> = {};
       
       // For each pharmacist, prepare their effective unavailable rules
@@ -948,27 +981,72 @@ export function RotaView({
           effectiveUnavailableRules[pharmacistId] = getAllUnavailableRules(pharmacist);
         }
       });
-
-      console.log('[handleGenerateWeeklyRota] Using effective unavailable rules:', effectiveUnavailableRules);
-      console.log('[handleGenerateWeeklyRota] Using selected weekdays:', selectedWeekdays);
       
-      await generateWeeklyRota({
+      // Get bank holiday information for the week
+      const mondayDate = new Date(selectedMonday);
+      const sundayDate = new Date(mondayDate);
+      sundayDate.setDate(mondayDate.getDate() + 6);
+      
+      // Detect bank holidays in the selected date range
+      const holidaysInWeek = getBankHolidaysInRange(mondayDate, sundayDate);
+      
+      // Transform bank holidays into a format suitable for the backend
+      const bankHolidayDates = holidaysInWeek.map(holiday => ({
+        date: holiday.date.toISOString().split('T')[0],
+        name: holiday.name
+      }));
+      
+      // Log all parameters being used for generation
+      console.log('[handleGenerateWeeklyRota] Generating rota with:');
+      console.log('[handleGenerateWeeklyRota] - Monday:', selectedMonday);
+      console.log('[handleGenerateWeeklyRota] - PharmacistIds:', selectedPharmacistIds);
+      console.log('[handleGenerateWeeklyRota] - ClinicIds:', selectedClinicIds);
+      console.log('[handleGenerateWeeklyRota] - Single pharmacist days:', finalSinglePharmacistDays);
+      console.log('[handleGenerateWeeklyRota] - Bank holidays:', bankHolidayDates);
+      console.log('[handleGenerateWeeklyRota] - Using effective unavailable rules:', effectiveUnavailableRules);
+      console.log('[handleGenerateWeeklyRota] - Using selected weekdays:', selectedWeekdays);
+      console.log('[handleGenerateWeeklyRota] - Regenerating:', regenerateRota);
+      
+      // Call the Convex mutation to generate the rota
+      const result = await generateWeeklyRota({
         startDate: selectedMonday,
         pharmacistIds: selectedPharmacistIds,
         clinicIds: selectedClinicIds,
         pharmacistWorkingDays: pharmacistWorkingDays,
-        singlePharmacistDispensaryDays: daysToUse, // Pass the determined state
-        regenerateRota: regenerateRota, // Pass the regenerateRota flag
-        effectiveUnavailableRules: effectiveUnavailableRules, // Pass the composite unavailable rules
+        singlePharmacistDispensaryDays: finalSinglePharmacistDays,
+        regenerateRota: regenerateRota === true,
+        effectiveUnavailableRules: effectiveUnavailableRules,
         selectedWeekdays: selectedWeekdays, // Pass the selected weekdays to include in generation
+        bankHolidays: bankHolidayDates, // Pass bank holiday information to backend
       });
+      
       console.log(`[handleGenerateWeeklyRota] Convex mutation call finished for startDate: ${selectedMonday}`);
+    } catch (error) {
+      console.error('[handleGenerateWeeklyRota] Error generating rota:', error);
+      alert('Error generating rota. Please try again.');
     } finally {
       setGeneratingWeekly(false);
       setRotaGenerated(true);
       console.log(`[handleGenerateWeeklyRota] finally block executed for startDate: ${selectedMonday}`);
     }
   }
+  
+  // Reimplemented publish rota function that creates a carbon copy of weekly rotas
+  const publishRota = useMutation(api.rotas.publishRota);
+  
+  // Add a function to save free cell text to rotas
+  const saveFreeCellTextToRota = useMutation(api.rotas.saveFreeCellText);
+  
+  const handlePublishRota = async () => {
+    setIsPublishing(true);
+    try {
+      // Get the IDs for all rotas in the current week
+      const rotaIds = Object.values(rotaIdsByDate);
+      if (rotaIds.length === 0) {
+        alert("No rotas to publish");
+        setIsPublishing(false);
+        return;
+      }
 
   console.log('Rendering rotaAssignments', rotaAssignments);
 
@@ -1974,31 +2052,52 @@ const getAssignmentForCell = (
             ))}
           </div>
           <h3 className="font-medium mt-6 mb-2">Select Weekdays to Include in Rota</h3>
-          <p className="text-sm text-gray-600 mb-2">Deselect days for bank holidays or other special circumstances.</p>
+          <p className="text-sm text-gray-600 mb-2">Bank holidays are automatically deselected. You can also manually deselect days for other special circumstances.</p>
+          
+          {/* Bank Holiday Information */}
+          {Object.keys(bankHolidays).length > 0 && (
+            <div className="mb-3 p-3 bg-yellow-50 border border-yellow-200 rounded text-sm">
+              <p className="font-medium text-yellow-800 mb-1">Bank Holidays Detected:</p>
+              <ul className="list-disc pl-5 text-yellow-700">
+                {Object.entries(bankHolidays).map(([dateStr, holiday]) => {
+                  const date = new Date(dateStr);
+                  const dayName = DAYS[date.getDay()];
+                  return (
+                    <li key={dateStr}>
+                      {dayName}, {date.toLocaleDateString('en-GB', {day: 'numeric', month: 'short'})} - {holiday.name}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+          
           <div className="flex flex-wrap gap-3 mb-4">
             {CLINIC_DAY_LABELS.map((day) => {
-              // Check if this weekday has any bank holidays during the selected week
-              const dayIndex = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(day);
-              const hasHoliday = selectedMonday && bankHolidays.some(h => {
-                const holidayDate = new Date(h.date);
-                return holidayDate.getDay() === dayIndex;
-              });
-              
-              // Get the holiday name if available
-              const holidayInfo = hasHoliday ? bankHolidays.find(h => {
-                const holidayDate = new Date(h.date);
-                return holidayDate.getDay() === dayIndex;
-              }) : null;
+              // Check if this day is a bank holiday in the selected week
+              const isBankHoliday = selectedMonday ? (() => {
+                const mondayDate = new Date(selectedMonday);
+                const dayIndex = CLINIC_DAY_LABELS.indexOf(day);
+                if (dayIndex === -1) return false;
+                
+                // Get the date for this weekday
+                const date = new Date(mondayDate);
+                date.setDate(mondayDate.getDate() + dayIndex);
+                const dateStr = date.toISOString().split('T')[0];
+                
+                // Check if this date is a bank holiday
+                return !!bankHolidays[dateStr];
+              })() : false;
               
               return (
                 <button
                   key={day}
                   type="button"
                   className={`px-3 py-1 rounded-full border text-sm font-medium transition-colors ${
-                    selectedWeekdays.includes(day)
-                      ? "bg-green-100 text-green-800 border-green-300"
-                      : hasHoliday
-                        ? "bg-red-50 text-red-700 border-red-200"
+                    selectedWeekdays.includes(day) 
+                      ? "bg-green-100 text-green-800 border-green-300" 
+                      : isBankHoliday
+                        ? "bg-yellow-100 text-yellow-800 border-yellow-300"
                         : "bg-gray-100 text-gray-500 border-gray-300"
                   }`}
                   onClick={() => {
@@ -2010,15 +2109,10 @@ const getAssignmentForCell = (
                       }
                     });
                   }}
-                  title={holidayInfo ? `Bank Holiday: ${holidayInfo.title}` : ""}
                 >
                   {day}
+                  {isBankHoliday && " 🏦"} {/* Bank icon for bank holidays */}
                   {selectedWeekdays.includes(day) ? " ✓" : " ✗"}
-                  {hasHoliday && (
-                    <span className="ml-1 text-xs text-red-600">
-                      (Holiday: {holidayInfo?.title})
-                    </span>
-                  )}
                 </button>
               );
             })}

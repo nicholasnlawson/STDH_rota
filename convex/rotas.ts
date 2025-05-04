@@ -41,7 +41,13 @@ export const generateRota = internalMutation({
     dispensaryDutyCounts: v.optional(v.record(v.string(), v.number())),
     weeklyClinicAssignments: v.optional(v.record(v.string(), v.number())),
     singlePharmacistDispensaryDays: v.optional(v.array(v.string())),
-    regenerateRota: v.optional(v.boolean())
+    regenerateRota: v.optional(v.boolean()),
+    effectiveUnavailableRules: v.optional(v.record(v.string(), v.array(v.object({
+      dayOfWeek: v.string(),
+      startTime: v.string(),
+      endTime: v.string()
+    })))),
+    includedWeekdays: v.optional(v.array(v.string())) // Store which weekdays were included in rota generation
   },
   handler: async (ctx, args) => {
     // Get all the requirements
@@ -3493,12 +3499,28 @@ for (const p of unassignedNonDefault8a) {
       slotStart: string,
       slotEnd: string
     ): boolean {
-      if (!pharmacist || !pharmacist.notAvailableRules) return false;
-      return pharmacist.notAvailableRules.some((rule: {dayOfWeek: string; startTime: string; endTime: string;}) => {
-        if (rule.dayOfWeek !== dayLabel) return false;
-        // If slot overlaps with not available rule
-        return !(slotEnd <= rule.startTime || slotStart >= rule.endTime);
-      });
+      if (!pharmacist) return false;
+      
+      // Check if we have effective unavailable rules for this pharmacist
+      if (args.effectiveUnavailableRules && args.effectiveUnavailableRules[pharmacist._id as string]) {
+        // Use the effective rules provided from the frontend
+        const rules = args.effectiveUnavailableRules[pharmacist._id as string];
+        return rules.some((rule: {dayOfWeek: string; startTime: string; endTime: string}) => {
+          if (rule.dayOfWeek !== dayLabel) return false;
+          // If slot overlaps with not available rule
+          return !(slotEnd <= rule.startTime || slotStart >= rule.endTime);
+        });
+      } else if (pharmacist.notAvailableRules) {
+        // Fall back to the pharmacist's permanent unavailable rules
+        return pharmacist.notAvailableRules.some((rule: {dayOfWeek: string; startTime: string; endTime: string;}) => {
+          if (rule.dayOfWeek !== dayLabel) return false;
+          // If slot overlaps with not available rule
+          return !(slotEnd <= rule.startTime || slotStart >= rule.endTime);
+        });
+      }
+      
+      // No unavailable rules found
+      return false;
     }
 
     // Helper function to get working pharmacists for a specific day
@@ -3623,6 +3645,7 @@ for (const p of unassignedNonDefault8a) {
       status: "draft",
       generatedBy: "system",
       generatedAt: Date.now(),
+      includedWeekdays: args.includedWeekdays, // Store which weekdays were included in rota generation
       conflicts,
     });
   },
@@ -3635,7 +3658,14 @@ export const generateWeeklyRota = mutation({
     clinicIds: v.optional(v.array(v.id("clinics"))),
     pharmacistWorkingDays: v.optional(v.record(v.string(), v.array(v.string()))),
     singlePharmacistDispensaryDays: v.optional(v.array(v.string())),
-    regenerateRota: v.optional(v.boolean())
+    regenerateRota: v.optional(v.boolean()),
+    effectiveUnavailableRules: v.optional(v.record(v.string(), v.array(v.object({
+      dayOfWeek: v.string(),
+      startTime: v.string(),
+      endTime: v.string()
+    })))),
+    // New parameter to specify which weekdays to include in rota generation
+    selectedWeekdays: v.optional(v.array(v.string()))
   },
   handler: async (ctx, args): Promise<Id<"rotas">[]> => {
     console.log('TEST LOG: generateWeeklyRota called with args:', JSON.stringify(args));
@@ -3691,6 +3721,13 @@ export const generateWeeklyRota = mutation({
       const isoDate = date.toISOString().split("T")[0];
       let workingPharmacists = args.pharmacistIds;
       let dayLabel = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][i];
+      
+      // Skip this day if it's not in the selectedWeekdays array
+      if (args.selectedWeekdays && !args.selectedWeekdays.includes(dayLabel)) {
+        console.log(`[generateWeeklyRota] Skipping ${dayLabel} (${isoDate}) as it's not in selectedWeekdays:`, args.selectedWeekdays);
+        continue; // Skip to the next day
+      }
+      
       if (args.pharmacistWorkingDays) {
         workingPharmacists = args.pharmacistIds.filter(pid => {
           const days = args.pharmacistWorkingDays?.[pid as string];
@@ -3708,7 +3745,9 @@ export const generateWeeklyRota = mutation({
         dispensaryDutyCounts: { ...dispensaryDutyCounts }, // Pass current counts
         weeklyClinicAssignments: { ...weeklyClinicAssignments }, // NEW: Pass clinic assignment counts
         singlePharmacistDispensaryDays: args.singlePharmacistDispensaryDays,
-        regenerateRota: args.regenerateRota
+        regenerateRota: args.regenerateRota,
+        effectiveUnavailableRules: args.effectiveUnavailableRules, // Pass effective unavailable rules
+        includedWeekdays: args.selectedWeekdays // Store which weekdays were included
       });
       
       // After rota is generated, update the counts for both regular dispensary shifts and lunch cover
@@ -3784,10 +3823,18 @@ export const generateWeeklyRota = mutation({
 });
 
 export const listRotas = query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db
-      .query("rotas")
+  args: {
+    status: v.optional(v.union(v.literal("draft"), v.literal("published"), v.literal("archived")))
+  },
+  handler: async (ctx, args) => {
+    let query = ctx.db.query("rotas");
+    
+    // Apply status filter if provided
+    if (args.status) {
+      query = query.filter(q => q.eq(q.field("status"), args.status));
+    }
+    
+    return await query
       .order("desc")
       .collect();
   },
@@ -3800,95 +3847,225 @@ export const getRota = query({
   },
 });
 
+export const deleteArchivedRotas = mutation({
+  args: {
+    // Allow deleting rotas for a specific week, or before a certain date
+    weekStartDate: v.optional(v.string()),
+    beforeDate: v.optional(v.string()),
+    // Require admin confirmation to prevent accidental deletion
+    adminConfirmation: v.string()
+  },
+  handler: async (ctx, args) => {
+    // Verify admin confirmation is correct
+    if (args.adminConfirmation !== "CONFIRM_DELETE_ARCHIVED_ROTAS") {
+      throw new Error("Invalid admin confirmation. Please type CONFIRM_DELETE_ARCHIVED_ROTAS to proceed.");
+    }
+    
+    let query = ctx.db
+      .query("rotas")
+      .filter(q => q.eq(q.field("status"), "archived"));
+    
+    // Add week filter if specified
+    if (args.weekStartDate && typeof args.weekStartDate === 'string') {
+      // Get the week end date (Sunday)
+      const startDate = new Date(args.weekStartDate);
+      const endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      const weekEndDate = endDate.toISOString().split('T')[0];
+      
+      // Filter by date range
+      query = query.filter(q => 
+        q.and(
+          q.gte(q.field("date"), args.weekStartDate as string),
+          q.lte(q.field("date"), weekEndDate)
+        )
+      );
+      
+      console.log(`[deleteArchivedRotas] Filtering by week: ${args.weekStartDate} to ${weekEndDate}`);
+    }
+    
+    // Add before date filter if specified
+    if (args.beforeDate && typeof args.beforeDate === 'string') {
+      query = query.filter(q => q.lt(q.field("date"), args.beforeDate as string));
+      console.log(`[deleteArchivedRotas] Filtering by before date: ${args.beforeDate}`);
+    }
+    
+    // Get archived rotas
+    const rotasToDelete = await query.collect();
+    console.log(`[deleteArchivedRotas] Found ${rotasToDelete.length} archived rotas to delete`);
+    
+    // Delete each archived rota
+    const deletedIds = [];
+    for (const rota of rotasToDelete) {
+      await ctx.db.delete(rota._id);
+      deletedIds.push(rota._id);
+      console.log(`[deleteArchivedRotas] Deleted rota ${rota._id} for date ${rota.date}`);
+    }
+    
+    // Return summary of deleted rotas
+    return {
+      deletedCount: rotasToDelete.length,
+      deletedIds: deletedIds,
+      message: `Successfully deleted ${rotasToDelete.length} archived rotas.`
+    };
+  }
+});
+
 export const publishRota = mutation({
   args: { 
     rotaId: v.id("rotas"),
-    userName: v.optional(v.string())
+    userName: v.optional(v.string()),
+    weekStartDate: v.string()
   },
   handler: async (ctx, args) => {
-    // Get the rota to publish
-    const rota = await ctx.db.get(args.rotaId);
-    if (!rota) throw new Error("Rota not found");
-
-    // Helper to get Monday for a given date string
-    function getWeekStartDate(dateStr: string) {
-      const d = new Date(dateStr);
-      const day = d.getDay();
-      // 0=Sunday, 1=Monday, ...
-      const diff = (day === 0 ? -6 : 1) - day; // If Sunday, go back 6 days, else back to Monday
-      d.setDate(d.getDate() + diff);
-      return d.toISOString().split('T')[0];
-    }
-
-    const weekStart = getWeekStartDate(rota.date);
-    // Get all rotas for the same week (Monday to Friday)
-    const allWeekRotas = await ctx.db.query("rotas").collect();
-    const rotasToPublish = allWeekRotas.filter(r => {
-      if (!r.date) return false;
-      const rWeekStart = getWeekStartDate(r.date);
-      return rWeekStart === weekStart;
-    });
+    const { rotaId, userName: providedUserName, weekStartDate } = args;
+    console.log(`[publishRota] STARTING PUBLISH of rotaId: ${rotaId} for week starting ${weekStartDate}`);
     
-    // Get identity for publication metadata
-    const identity = await ctx.auth.getUserIdentity();
-    
-    // Determine the user name to display
-    let userName;
-    
-    // First check if a userName was passed in explicitly from the client
-    if (args.userName) {
-      userName = args.userName;
-    } 
-    // Next try to get the user's name from their identity
-    else if (identity?.name) {
-      userName = identity.name;
-    }
-    // Fall back to using email if available 
-    else if (identity?.email) {
-      const email = identity.email;
-      // Try to extract a name from the email (before the @)
-      userName = email.split('@')[0];
-      // Convert formats like john.doe to John Doe
-      userName = userName
-        .split(/[._]/)
-        .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-        .join(' ');
-    }
-    // Last resort - use a generic name
-    else {
-      userName = "User";
-    }
-    
-    // Get current timestamp for publication metadata
-    const now = new Date();
-    const publishedAt = now.toISOString(); // Store as ISO string to fix type error
-    const formattedDate = now.toLocaleDateString();
-    const formattedTime = now.toLocaleTimeString();
-    
-    // Mark all as published with metadata
-    await Promise.all(rotasToPublish.map(r => ctx.db.patch(r._id, { 
-      status: "published",
-      publishedBy: userName, // Just store the name, not the email/ID
-      publishedAt: publishedAt,
-      publishDate: formattedDate,
-      publishTime: formattedTime
-    })));
-    
-    // Log assignments for each published rota
-    for (const r of rotasToPublish) {
-      const fullRota = await ctx.db.get(r._id);
-      if (fullRota) {
-        console.log(`[publishRota] Rota for date ${fullRota.date}: assignments count = ${Array.isArray(fullRota.assignments) ? fullRota.assignments.length : 0}`);
-        console.log(`[publishRota] Published by: ${userName} at ${formattedDate} ${formattedTime}`);
-        if (Array.isArray(fullRota.assignments)) {
-          fullRota.assignments.forEach((a: any, idx: number) => {
-            console.log(`[publishRota]  Assignment #${idx + 1}:`, JSON.stringify(a));
-          });
+    try {
+      // Get the rota to publish as a reference
+      const rotaToPublish = await ctx.db.get(rotaId);
+      if (!rotaToPublish) throw new Error("Rota not found");
+      
+      const date = rotaToPublish.date;
+      if (!date) throw new Error("Rota has no date");
+      console.log(`[publishRota] Using reference rota for date: ${date}`);
+      
+      // Determine the user name to display
+      let userName = "Unknown User";
+      const identity = await ctx.auth.getUserIdentity();
+      
+      if (providedUserName) {
+        userName = providedUserName;
+      } else if (identity?.name) {
+        userName = identity.name;
+      } else if (identity?.email) {
+        const email = identity.email;
+        userName = email.split('@')[0]
+          .split(/[._]/)
+          .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+          .join(' ');
+      }
+      
+      // Get all DRAFT rotas for this week only
+      console.log(`[publishRota] Finding all draft rotas for week starting ${weekStartDate}`);
+      const rotasForWeek = await ctx.db.query("rotas")
+        .filter(q => {
+          // Logic to filter rotas by the same week and only draft status
+          const rotaDate = q.field("date");
+          const rotaStatus = q.field("status");
+          // Use a string comparison for the week start date
+          // This assumes the rotaDate strings are in YYYY-MM-DD format
+          return q.and(
+            q.eq(rotaStatus, "draft"),                     // only draft rotas
+            q.gte(rotaDate, weekStartDate),               // rota date >= week start
+            q.lt(rotaDate, addDays(weekStartDate, 7))     // rota date < week start + 7 days
+          );
+        })
+        .collect();
+        
+      console.log(`[publishRota] Found ${rotasForWeek.length} rotas for week starting ${weekStartDate}`);
+      
+      // Create metadata for the published rota set
+      const now = new Date();
+      const publishedAt = now.toISOString(); 
+      const formattedDate = now.toLocaleDateString();
+      const formattedTime = now.toLocaleTimeString();
+      
+      // Create a unique ID for this published set
+      const publishedSetId = `${weekStartDate}-${Date.now()}`;
+      
+      // Archive any previously published rotas for THIS WEEK
+      console.log(`[publishRota] Finding any previously published rotas for week starting ${weekStartDate}`);
+      const publishedRotasForSameWeek = await ctx.db.query("rotas")
+        .filter(q => 
+          q.and(
+            q.eq(q.field("status"), "published"),
+            q.gte(q.field("date"), weekStartDate),
+            q.lt(q.field("date"), addDays(weekStartDate, 7))
+          )
+        )
+        .collect();
+      
+      console.log(`[publishRota] Found ${publishedRotasForSameWeek.length} previously published rotas for week starting ${weekStartDate}`);
+      
+      // Archive previously published rotas
+      if (publishedRotasForSameWeek.length > 0) {
+        for (const prevRota of publishedRotasForSameWeek) {
+          console.log(`[publishRota] Archiving previously published rota: ${prevRota._id} (${prevRota.date})`);
+          await ctx.db.patch(prevRota._id, { status: "archived" });
         }
       }
+      
+      // Create a new set of published rotas (as carbon copies)
+      const publishedRotaIds = [];
+      
+      for (const rota of rotasForWeek) {
+        // Create a new document that is a carbon copy, but with published status
+        console.log(`[publishRota] Creating carbon copy of rota ${rota._id} for date ${rota.date}`);
+        
+        // Create a new rota document with all the same data plus publication metadata
+        // Extract fields from the original rota, excluding _id and _creationTime
+        const { _id, _creationTime, ...rotaData } = rota;
+        
+        const newRotaId = await ctx.db.insert("rotas", {
+          ...rotaData,      // Copy all relevant fields from original
+          originalRotaId: rota._id,  // Reference to the original rota
+          status: "published",
+          publishedBy: userName,
+          publishedAt: publishedAt,
+          publishDate: formattedDate,
+          publishTime: formattedTime,
+          publishedSetId: publishedSetId  // Track which published set this belongs to
+        });
+        
+        publishedRotaIds.push(newRotaId);
+      }
+      
+      console.log(`[publishRota] Successfully published ${publishedRotaIds.length} rotas for week starting ${weekStartDate}`);
+      console.log(`[publishRota] Published by: ${userName} at ${formattedDate} ${formattedTime}`);
+      console.log(`[publishRota] Published set ID: ${publishedSetId}`);
+      
+      return { 
+        publishedRotaIds,
+        publishedSetId
+      };
+      
+    } catch (error) {
+      console.error(`[publishRota] ERROR publishing rota ${rotaId}:`, error);
+      throw error;
     }
-    return rotasToPublish.map(r => r._id);
   },
+});
+
+// Helper function to add days to a date string
+function addDays(dateString: string, days: number): string {
+  const date = new Date(dateString);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().split('T')[0];
+}
+
+// Function to save free cell text to a rota
+export const saveFreeCellText = mutation({
+  args: { 
+    rotaId: v.id("rotas"),
+    freeCellText: v.record(v.string(), v.string())
+  },
+  handler: async (ctx, args) => {
+    const { rotaId, freeCellText } = args;
+    
+    // Get the rota
+    const rota = await ctx.db.get(rotaId);
+    if (!rota) {
+      throw new Error(`Rota with ID ${rotaId} not found`);
+    }
+    
+    console.log(`[saveFreeCellText] Saving free cell text for rota ${rotaId}:`, freeCellText);
+    
+    // Update the rota with the free cell text
+    await ctx.db.patch(rotaId, { freeCellText });
+    
+    return { success: true };
+  }
 });
 
 export const updateRotaAssignment = mutation({

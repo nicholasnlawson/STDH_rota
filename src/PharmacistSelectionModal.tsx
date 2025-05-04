@@ -19,7 +19,8 @@ export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPha
   if (!isOpen) return null;
 
   const filteredPharmacists = pharmacists.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase())
+    p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    (p.displayName && p.displayName.toLowerCase().includes(searchTerm.toLowerCase()))
   );
 
   const handleSelect = (pharmacistId: Id<"pharmacists">) => {

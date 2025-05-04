@@ -4,11 +4,12 @@ import { authTables } from "@convex-dev/auth/server";
 
 const applicationTables = {
   pharmacists: defineTable({
-    name: v.string(),
+    name: v.string(), // Full name
+    displayName: v.optional(v.string()), // How the name appears in the rota
+    email: v.optional(v.string()),
+    // Temporarily add legacy fields during migration
     firstName: v.optional(v.string()),
     lastName: v.optional(v.string()),
-    displayName: v.optional(v.string()),
-    email: v.string(),
     band: v.string(),
     primaryDirectorate: v.string(),
     warfarinTrained: v.boolean(),
@@ -78,14 +79,20 @@ const applicationTables = {
         isLunchCover: v.optional(v.boolean()),
       })
     ),
+    // Store free text edits (key-value pairs where key is cellId and value is text)
+    freeCellText: v.optional(v.record(v.string(), v.string())),
     status: v.union(v.literal("draft"), v.literal("published"), v.literal("archived")),
     generatedBy: v.string(),
     generatedAt: v.number(),
+    // Weekday inclusion tracking for bank holidays and special days
+    includedWeekdays: v.optional(v.array(v.string())), // List of weekdays that were included in rota generation
     // Publication metadata
     publishedBy: v.optional(v.string()),
     publishedAt: v.optional(v.string()),
     publishDate: v.optional(v.string()), // Formatted date
     publishTime: v.optional(v.string()), // Formatted time
+    publishedSetId: v.optional(v.string()), // ID to group published rotas by set
+    originalRotaId: v.optional(v.id("rotas")), // Reference to the original rota
     conflicts: v.optional(v.array(
       v.object({
         type: v.string(),
