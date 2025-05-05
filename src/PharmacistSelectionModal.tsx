@@ -18,10 +18,18 @@ export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPha
 
   if (!isOpen) return null;
 
-  const filteredPharmacists = pharmacists.filter(p => 
-    p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    (p.displayName && p.displayName.toLowerCase().includes(searchTerm.toLowerCase()))
-  );
+  // Filter pharmacists based on search term, then sort alphabetically by name
+  const filteredPharmacists = pharmacists
+    .filter(p => 
+      p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+      (p.displayName && p.displayName.toLowerCase().includes(searchTerm.toLowerCase()))
+    )
+    .sort((a, b) => {
+      // Use displayName if available, otherwise fall back to name
+      const nameA = (a.displayName || a.name).toLowerCase();
+      const nameB = (b.displayName || b.name).toLowerCase();
+      return nameA.localeCompare(nameB);
+    });
 
   const handleSelect = (pharmacistId: Id<"pharmacists">) => {
     onSelect(pharmacistId, selectedScope);

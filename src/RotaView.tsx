@@ -4,6 +4,8 @@ import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
 import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
 import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
 
 /* Custom CSS for Not Selected overlays */
 const notSelectedStyles = `
@@ -32,21 +34,38 @@ const CLINIC_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday
 
 interface RotaViewProps {
   isViewOnly?: boolean;
+  isAdmin?: boolean;
   initialSelectedMonday?: string;
   initialRotaAssignments?: any[];
   initialRotaIdsByDate?: Record<string, Id<"rotas">>;
-  publishedRota?: any; // Published rota data when editing a published rota
-  onEditsChanged?: (updates: { assignments?: any[], freeCellText?: Record<string, string> }) => void;
+  publishedRota?: {
+    _id: Id<"rotas">;
+    date: string;
+    title?: string;
+    publishedBy?: {
+      name: string;
+      email: string;
+    };
+    includedWeekdays?: string[];
+  } | null;
+  onEditsChanged?: (edits: {
+    assignments?: any[];
+    freeCellText?: Record<string, string>;
+  }) => void;
 }
 
 export function RotaView({
   isViewOnly = false,
+  isAdmin = false,
   initialSelectedMonday = "",
   initialRotaAssignments = [],
   initialRotaIdsByDate = {},
   publishedRota = null,
   onEditsChanged
 }: RotaViewProps = {}): React.ReactElement {
+  // If user is not an admin and not in a specific view-only mode (like viewing published rotas),
+  // set isViewOnly to true to prevent any edits
+  const effectiveViewOnly = isViewOnly || !isAdmin;
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
   const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
@@ -62,7 +81,7 @@ export function RotaView({
   const [generatingWeekly, setGeneratingWeekly] = useState(false);
   const [showClinicSelection, setShowClinicSelection] = useState(false);
   const [showPharmacistSelection, setShowPharmacistSelection] = useState(false);
-  const [rotaGenerated, setRotaGenerated] = useState(isViewOnly || false);
+  const [rotaGenerated, setRotaGenerated] = useState(effectiveViewOnly || false);
   const [isPublishing, setIsPublishing] = useState(false);
   const [publishSuccess, setPublishSuccess] = useState(false);
   // Track current user for tracking metadata when publishing
@@ -96,7 +115,7 @@ export function RotaView({
   const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
   
   // Query to get all rotas - with appropriate filter based on view mode
-  const allRotas = useQuery(api.rotas.listRotas, { status: isViewOnly ? "published" : "draft" }) || [];
+  const allRotas = useQuery(api.rotas.listRotas, { status: effectiveViewOnly ? "published" : "draft" }) || [];
   
   // State for tracking dynamically added EAU rows
   const [eauAdditionalRows, setEauAdditionalRows] = useState<number[]>([]);
@@ -119,7 +138,7 @@ export function RotaView({
       const rotaId = rotaIdsByDate ? rotaIdsByDate[isoDate] : null;
       
       // For published rotas in edit mode, we need special handling
-      if (!isViewOnly && publishedRota && publishedRota._id) {
+      if (!effectiveViewOnly && publishedRota && publishedRota._id) {
         // For dates that are within our published rota week, use the saved included weekdays
         if (publishedRota.includedWeekdays && Array.isArray(publishedRota.includedWeekdays)) {
           // If we're in edit mode for a published rota, we want to keep showing the same days
@@ -157,7 +176,7 @@ export function RotaView({
       // If we haven't been able to determine from a published rota:
       // In edit mode, use the current selectedWeekdays state
       // In view mode, default to included (weekdays) or excluded (weekends)
-      if (!isViewOnly) {
+      if (!effectiveViewOnly) {
         return selectedWeekdays.indexOf(dayLabel) === -1;
       } else {
         // Default weekday selection for view mode if no published rota data available
@@ -169,7 +188,7 @@ export function RotaView({
     }
   // We're explicitly NOT including rotaIdsByDate in the dependency array
   // to prevent infinite loops when the function is used in effects that update rotaIdsByDate
-  }, [isViewOnly, publishedRota, selectedWeekdays]);
+  }, [effectiveViewOnly, publishedRota, selectedWeekdays]);
   
   // Add the custom CSS styles to the document
   useEffect(() => {
@@ -239,7 +258,7 @@ export function RotaView({
         }));
         
         // If in edit mode of published rota, notify parent about changes
-        if (!isViewOnly && onEditsChanged) {
+        if (!effectiveViewOnly && onEditsChanged) {
           onEditsChanged({ freeCellText: updatedFreeCellText });
         }
       }
@@ -690,7 +709,7 @@ export function RotaView({
       console.log('[handleReset] Handling reset for rota with selectedMonday:', selectedMonday);
       
       // Handle reset differently based on whether we're editing a published rota
-      if (publishedRota && !isViewOnly && initialRotaAssignments && initialRotaIdsByDate) {
+      if (publishedRota && !effectiveViewOnly && initialRotaAssignments && initialRotaIdsByDate) {
         // For published rotas in edit mode, simply restore to the initial data without regenerating
         console.log('[handleReset] Editing published rota - restoring original assignments');
         
@@ -748,7 +767,7 @@ export function RotaView({
     
     // Handle special case: when we're showing published rotas in edit mode,
     // we should maintain the initialRotaAssignments and not recompute from allRotas
-    if (initialRotaAssignments && initialRotaAssignments.length > 0 && initialRotaIdsByDate && !isViewOnly) {
+    if (initialRotaAssignments && initialRotaAssignments.length > 0 && initialRotaIdsByDate && !effectiveViewOnly) {
       console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
       // Set state in one batch to avoid flicker
       setRotaIdsByDate(initialRotaIdsByDate);
@@ -757,7 +776,7 @@ export function RotaView({
     }
     
     // Always prioritize initialRotaAssignments when in edit mode - this prevents table from disappearing
-    if (!isViewOnly && initialRotaAssignments && initialRotaAssignments.length > 0) {
+    if (!effectiveViewOnly && initialRotaAssignments && initialRotaAssignments.length > 0) {
       console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
       // We do this check even if we already have rotaAssignments to ensure consistent state
       if (initialRotaIdsByDate) {
@@ -834,8 +853,8 @@ export function RotaView({
     }
   // We're explicitly NOT including rotaIdsByDate and rotaAssignments in the dependency array
   // to prevent infinite loops, as we update them in the effect
-  // isViewOnly change is handled specially to ensure table never disappears
-  }, [allRotas, initialRotaAssignments, initialRotaIdsByDate, isViewOnly]);
+  // effectiveViewOnly change is handled specially to ensure table never disappears
+  }, [allRotas, initialRotaAssignments, initialRotaIdsByDate, effectiveViewOnly, isViewOnly]);
 
   // --- LOGGING: Selected Monday and Rendered Dates ---
   useEffect(() => {
@@ -887,7 +906,7 @@ export function RotaView({
         });
       }
     }
-  }, [selectedMonday, isViewOnly]);
+  }, [selectedMonday, effectiveViewOnly]);
 
   // Reimplemented publish rota function that creates a carbon copy of weekly rotas
   const publishRota = useMutation(api.rotas.publishRota);
@@ -1032,9 +1051,130 @@ export function RotaView({
   console.log('Rendering rotaAssignments', rotaAssignments);
 
   // Sort clinics by dayOfWeek and startTime for display
-  const sortedSelectedClinics = clinics
-    .filter((c: any) => selectedClinicIds.includes(c._id))
-    .sort((a: any, b: any) => (a.dayOfWeek - b.dayOfWeek) || a.startTime.localeCompare(b.startTime));
+  // Function to generate and download a PDF of the rota
+  const handleDownloadPDF = async () => {
+    try {
+      console.log('[handleDownloadPDF] Starting PDF generation');
+      // Get the table element
+      const tableElement = document.querySelector('.rota-table');
+      if (!tableElement) {
+        console.error('[handleDownloadPDF] Table element not found');
+        return;
+      }
+      
+      // Create a loading indicator
+      const loadingDiv = document.createElement('div');
+      loadingDiv.style.position = 'fixed';
+      loadingDiv.style.top = '50%';
+      loadingDiv.style.left = '50%';
+      loadingDiv.style.transform = 'translate(-50%, -50%)';
+      loadingDiv.style.background = 'rgba(255,255,255,0.9)';
+      loadingDiv.style.padding = '20px';
+      loadingDiv.style.borderRadius = '8px';
+      loadingDiv.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
+      loadingDiv.style.zIndex = '9999';
+      loadingDiv.innerHTML = '<p style="font-weight:bold;margin:0">Generating PDF...</p>';
+      document.body.appendChild(loadingDiv);
+      
+      // Use html2canvas to capture the table as an image
+      console.log('[handleDownloadPDF] Capturing table with html2canvas');
+      const canvas = await html2canvas(tableElement as HTMLElement, {
+        scale: 1.5, // Higher quality
+        useCORS: true,
+        logging: true,
+        onclone: (clonedDoc) => {
+          // Find the cloned table and make it visible for capturing
+          const clonedTable = clonedDoc.querySelector('.rota-table');
+          if (clonedTable) {
+            (clonedTable as HTMLElement).style.overflow = 'visible';
+            (clonedTable as HTMLElement).style.width = 'auto';
+          }
+        }
+      });
+      
+      // Calculate optimal PDF page size (landscape)
+      const imgWidth = 280; // A4 width in mm (landscape)
+      const imgHeight = canvas.height * imgWidth / canvas.width;
+      
+      // Create PDF (A4 landscape)
+      const pdf = new jsPDF('landscape', 'mm', 'a4');
+      
+      // Add title
+      const weekStart = new Date(selectedMonday);
+      const weekEnd = new Date(selectedMonday);
+      weekEnd.setDate(weekEnd.getDate() + 4); // Friday
+      
+      pdf.setFontSize(16);
+      pdf.text('STDH Pharmacy Rota', 15, 15);
+      pdf.setFontSize(12);
+      pdf.text(`Week of ${weekStart.toLocaleDateString()} - ${weekEnd.toLocaleDateString()}`, 15, 22);
+  
+      
+      // Add the table image
+      pdf.addImage(
+        canvas.toDataURL('image/jpeg', 0.95), // Use JPEG for smaller file size
+        'JPEG',
+        10, // x position
+        35, // y position
+        imgWidth, // width
+        imgHeight // height
+      );
+      
+      // Save the PDF
+      pdf.save(`STDH_Pharmacy_Rota_${selectedMonday}.pdf`);
+      console.log('[handleDownloadPDF] PDF generated and saved');
+      
+      // Remove loading indicator
+      document.body.removeChild(loadingDiv);
+    } catch (error) {
+      console.error('[handleDownloadPDF] Error generating PDF:', error);
+      alert('Error generating PDF. Please try again.');
+    }
+  };
+  
+  // For viewing an existing rota, use clinic assignments from rota data
+  // For creating a new rota, use the selected clinics from the UI
+  const sortedSelectedClinics = useMemo(() => {
+    // Extract clinic IDs from active assignments in the current rota
+    // Only consider assignments for days that are not deselected
+    const clinicIdsInRota = new Set(
+      rotaAssignments
+        .filter(a => {
+          // Only include clinics that are currently active in the rota
+          if (a.type !== "clinic") return false;
+          
+          // Check if the assignment's date is for a deselected day
+          const assignmentDate = new Date(a.date);
+          const isDeselected = isDeselectedDay(assignmentDate);
+          
+          // Only include clinics for days that are selected
+          return !isDeselected;
+        })
+        .map(a => {
+          // Find the clinic object that matches this location
+          const clinic = clinics.find(c => c.name === a.location);
+          return clinic ? clinic._id : null;
+        })
+        .filter(Boolean) // Remove null values
+    );
+    
+    // Determine which clinic IDs to display in the rota
+    // If we're viewing a rota, use the IDs from active assignments (filtered above)
+    // If we're creating a new rota, use the IDs that the user has explicitly selected
+    const clinicIdsToUse = effectiveViewOnly && clinicIdsInRota.size > 0 
+      ? Array.from(clinicIdsInRota)
+      : selectedClinicIds;
+    
+    console.log('[sortedSelectedClinics] Clinic IDs in rota:', Array.from(clinicIdsInRota));
+    console.log('[sortedSelectedClinics] Selected clinic IDs from UI:', selectedClinicIds);
+    console.log('[sortedSelectedClinics] Using clinic IDs:', clinicIdsToUse);
+    console.log('[sortedSelectedClinics] View only mode:', effectiveViewOnly);
+    
+    // Filter and sort clinics for display
+    return clinics
+      .filter((c: any) => clinicIdsToUse.includes(c._id))
+      .sort((a: any, b: any) => (a.dayOfWeek - b.dayOfWeek) || a.startTime.localeCompare(b.startTime));
+  }, [clinics, rotaAssignments, selectedClinicIds, effectiveViewOnly, isDeselectedDay]);
 
   // Add helper to get the assignment index within the rota
   const getAssignmentIndexInRota = (assignment: any) => {
@@ -1339,7 +1479,7 @@ const getAssignmentForCell = (
     slotStartTime: string,
     slotEndTime: string
   ) => {
-    if (isViewOnly) return; // Prevent drag in view-only mode
+    if (effectiveViewOnly) return; // Prevent drag in view-only mode
     
     // Set dragSource with the current cell's data
     setDragSource({
@@ -1379,7 +1519,7 @@ const getAssignmentForCell = (
     slotStartTime: string, 
     slotEndTime: string
   ) => {
-    if (isViewOnly || !dragSource || !pharmacistId) return; // Don't allow dropping in view-only mode or if no drag started or no pharmacist to swap with
+    if (effectiveViewOnly || !dragSource || !pharmacistId) return; // Don't allow dropping in view-only mode or if no drag started or no pharmacist to swap with
     
     // Don't allow dropping on the same cell that started the drag
     if (dragSource.pharmacistId === pharmacistId && 
@@ -1414,7 +1554,7 @@ const getAssignmentForCell = (
   };
   
   const handleDrop = (event: React.DragEvent<HTMLTableDataCellElement>) => {
-    if (isViewOnly || !dragSource || !dragTarget) return;
+    if (effectiveViewOnly || !dragSource || !dragTarget) return;
     
     event.preventDefault();
     
@@ -2020,8 +2160,8 @@ const getAssignmentForCell = (
 };
 
   return (
-    <div className={`mt-4 ${isViewOnly ? 'p-0' : 'p-4'}`}>
-      <div className="flex gap-4 mt-6">
+    <div className="mt-4 w-full" style={{ padding: 0, margin: 0, boxSizing: 'border-box' }}>
+      <div className="flex gap-4 mt-6 mx-4">
         <div>
           <label className="block font-medium mb-1">Select Monday (week start)</label>
           <input
@@ -2170,7 +2310,7 @@ const getAssignmentForCell = (
                     )}
                   </div>
                   {selectedPharmacistIds.includes(pharmacist._id) && (
-                    <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
+                    <div className="flex flex-wrap gap-2 items-center mb-2">
                       <div className="flex gap-2 items-center">
                         <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
                         {CLINIC_DAY_LABELS.map((day: string) => (
@@ -2311,7 +2451,7 @@ const getAssignmentForCell = (
                                   
                                   setPharmacistWorkingDays(newObj);
                                 }}
-                                disabled={isViewOnly}
+                                disabled={effectiveViewOnly}
                               >
                                 {day}
                               </button>
@@ -2347,7 +2487,7 @@ const getAssignmentForCell = (
           </div>
           <button
             className="mt-4 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
-            disabled={selectedPharmacistIds.length === 0 || isViewOnly}
+            disabled={selectedPharmacistIds.length === 0 || effectiveViewOnly}
             onClick={() => {
               setShowPharmacistSelection(false);
               handleGenerateWeeklyRota();
@@ -2358,15 +2498,30 @@ const getAssignmentForCell = (
         </div>
       )}
       {(rotaGenerated || (rotaAssignments.length > 0 && selectedMonday)) && (
-        <div className="mt-10">
-          <div className="flex justify-between items-center mb-4">
+        <div className="mt-10" style={{ width: '100%', margin: 0, padding: 0 }}>
+          <div className="flex justify-between items-center mb-4 mx-4">
             <h3 className="text-xl font-bold">Weekly Rota Table</h3>
             <div className="flex items-center space-x-2">
               {publishSuccess && (
-                <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded">
+                <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded mr-2">
                   Rota published successfully!
                 </span>
               )}
+              
+              {/* Download PDF button - only show when viewing a published rota */}
+              {(effectiveViewOnly || publishedRota) && (
+                <button
+                  onClick={handleDownloadPDF}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded flex items-center mr-2"
+                  title="Download PDF of rota"
+                >
+                  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                  </svg>
+                  Download PDF
+                </button>
+              )}
+              
               <div className="flex space-x-2">
                 <button
                   className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 flex items-center"
@@ -2392,26 +2547,29 @@ const getAssignmentForCell = (
                   Add EAU Row
                 </button>
                 
-                <button
-                  className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 flex items-center"
-                  onClick={handlePublishRota}
-                  disabled={isPublishing || isViewOnly}
-                >
-                  {isPublishing ? (
-                    <>
-                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Publishing...
-                    </>
-                  ) : "Publish Rota"}
-                </button>
+                {/* Only show the Publish Rota button when not editing an already published rota */}
+                {!publishedRota && (
+                  <button
+                    className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 flex items-center"
+                    onClick={handlePublishRota}
+                    disabled={isPublishing || effectiveViewOnly}
+                  >
+                    {isPublishing ? (
+                      <>
+                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Publishing...
+                      </>
+                    ) : "Publish Rota"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
           {/* Dispensary Mode Toggles */}
-          <div className="mb-4">
+          <div className="mb-4 mx-4">
             {selectedMonday && [0,1,2,3,4].map((dayOffset: number) => {
               // Ensure selectedMonday is valid before creating date objects
               const date = new Date(selectedMonday);
@@ -2478,8 +2636,8 @@ const getAssignmentForCell = (
             })}
           </div>
           
-          <div className={`${isViewOnly ? 'w-screen pr-8' : 'overflow-x-auto w-full'}`}>
-            <table className="w-full border border-gray-300 mb-4" style={{ tableLayout: 'fixed' }}>
+          <div style={{ width: 'calc(100vw - 8px)', maxWidth: 'calc(100vw - 8px)', overflow: 'auto', position: 'relative' as const, left: '50%', right: '50%', marginLeft: 'calc(-50vw + 4px)', marginRight: 'calc(-50vw + 4px)' }}>
+            <table className="w-full border border-gray-300 mb-4 rota-table" style={{ tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '120px' }} />
                 <col style={{ width: '120px' }} />
@@ -2495,7 +2653,7 @@ const getAssignmentForCell = (
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     return (
-                      <th key={dayOffset} colSpan={TIME_SLOTS.length} className="border p-2 bg-gray-100 text-xs border-r-4 border-gray-400 border-b border-gray-200" style={{ borderBottomWidth: 1 }}>
+                      <th key={dayOffset} colSpan={TIME_SLOTS.length} className="border p-2 bg-gray-100 text-xs border-b border-gray-200" style={{ borderBottomWidth: 1 }}>
                         {DAYS[date.getDay()]}<br/>{date.toLocaleDateString()}
                       </th>
                     );
@@ -2506,8 +2664,8 @@ const getAssignmentForCell = (
                   {[...Array(5)].flatMap((_, dayIdx: number) =>
                     TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => (
                       <th key={dayIdx + '-' + slot.start + '-' + slot.end}
-                        className={`border p-2 bg-blue-50 text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
-                        style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                        className="border p-2 bg-blue-50 text-xs"
+                        style={{ borderBottom: '1px solid #e5e7eb' }}
                       >
                         {slot.start}-{slot.end}
                       </th>
@@ -2526,7 +2684,15 @@ const getAssignmentForCell = (
     const isLastInDirectorate = idx < arr.length - 1 && ward.directorate !== arr[idx + 1].directorate;
     
     // Apply directorate separator style
-    const rowStyle = isLastInDirectorate ? { borderBottom: '4px solid #9ca3af' } : { borderBottom: '1px solid #e5e7eb' };
+    // Use box-shadow instead of border for directorate separators to make it hang under the cell for PDF output
+    const rowStyle = isLastInDirectorate 
+      ? { 
+          borderBottom: '1px solid #e5e7eb', 
+          boxShadow: 'inset 0 -4px 0 -1px #9ca3af', // This makes the border hang below the cell
+          position: 'relative' as const,
+          zIndex: 1
+        } 
+      : { borderBottom: '1px solid #e5e7eb' };
     
     // Check if this is the EAU ward - use very explicit detection to catch all possible forms
     const isEAU = ward.name === "EAU" || 
@@ -2583,17 +2749,17 @@ const getAssignmentForCell = (
             return (
               <td
                 key={isoDate + slot.start + slot.end + ward.name}
-                className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-gray-100' : ''} ${!isViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'bg-gray-200' : ''}`}
+                className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-gray-100' : ''} ${!effectiveViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'bg-gray-200' : ''}`}
                 style={{ 
                   ...rowStyle, 
-                  borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, 
+                  // No special border for last slot 
                   height: '2.5em', 
                   minHeight: '2.5em', 
                   lineHeight: '1.2', 
                   whiteSpace: 'normal', 
                   wordBreak: 'break-word', 
                   overflow: 'hidden',
-                  ...(isDeselected ? { position: 'relative', pointerEvents: 'none', opacity: '0.7' } : {})
+                  ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const, opacity: '0.7' } : {})
                 }}
                 onClick={() => !isDeselected && displayAssignments.length === 0 && handleEmptyCellClick(ward.name, "ward", isoDate, slot.start, slot.end)}
                 onDragOver={(e) => !isDeselected && displayAssignments.length > 0 && handleDragOver(e, displayAssignments[0].pharmacistId, displayAssignments[0], ward.name, isoDate, slot.start, slot.end)}
@@ -2673,7 +2839,7 @@ const getAssignmentForCell = (
                 return (
                   <td
                     key={isoDate + slot.start + slot.end + rowName}
-                    className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-blue-100' : ''} ${!isViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'not-selected-cell' : ''}`}
+                    className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-blue-100' : ''} ${!effectiveViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'not-selected-cell' : ''}`}
                     style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word', overflow: 'hidden' }}
                     onClick={() => displayAssignments.length === 0 && handleEmptyCellClick(rowName, "ward", isoDate, slot.start, slot.end)}
                     onDragOver={(e) => displayAssignments.length > 0 && handleDragOver(e, displayAssignments[0].pharmacistId, displayAssignments[0], rowName, isoDate, slot.start, slot.end)}
@@ -2695,9 +2861,9 @@ const getAssignmentForCell = (
                         {displayAssignments.map((assignment, index) => (
                           <div 
                             key={`${assignment.pharmacistId}-${index}`}
-                            className={`${getPharmacistCellClass(assignment.pharmacistId)} w-full p-1 flex items-center justify-center ${!isViewOnly ? 'cursor-grab' : ''}`}
+                            className={`${getPharmacistCellClass(assignment.pharmacistId)} w-full p-1 flex items-center justify-center ${!effectiveViewOnly ? 'cursor-grab' : ''}`}
                             style={{ height: `${100 / displayAssignments.length}%`, borderTop: index > 0 ? '1px solid rgba(0,0,0,0.1)' : 'none' }}
-                            draggable={!isViewOnly}
+                            draggable={!effectiveViewOnly}
                             onClick={(e) => {
                               e.stopPropagation();
                               handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end);
@@ -2728,7 +2894,7 @@ const getAssignmentForCell = (
 
   {/* --- Dispensary --- */}
   <tr>
-    <td className="border p-2 font-semibold sticky left-0 bg-white z-10" colSpan={2} style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Dispensary</td>
+    <td className="p-2 font-semibold sticky left-0 bg-white z-10" colSpan={2} style={{ border: '1px solid #e5e7eb' }}>Dispensary</td>
     {[0,1,2,3,4].flatMap((dayOffset: number) => {
       const date = new Date(selectedMonday);
       date.setDate(date.getDate() + dayOffset);
@@ -2751,11 +2917,10 @@ const getAssignmentForCell = (
         return (
           <td
             key={dayOffset + '-' + slotIdx}
-            className={`border p-1 text-xs bg-gray-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
+            className={`p-1 text-xs bg-gray-50 font-semibold ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
             style={{ 
-              borderTop: '4px solid #9ca3af', 
-              borderBottom: '1px solid #e5e7eb', 
-              borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, 
+              borderTop: 'none',
+              borderBottom: 'none',
               height: '2.5em', 
               minHeight: '2.5em', 
               lineHeight: '1.2', 
@@ -2804,15 +2969,11 @@ const getAssignmentForCell = (
     const isFirstClinic = idx === 0;
     // Determine if this is the last clinic
     const isLastClinic = idx === sortedSelectedClinics.length - 1;
-    const rowStyle = {
-      borderTop: isFirstClinic ? '4px solid #9ca3af' : '1px solid #e5e7eb',
-      borderBottom: isLastClinic ? '4px solid #9ca3af' : '1px solid #e5e7eb'
-    };
     
     return (
       <tr key={clinic._id}>
-        <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{clinicLabel}</td>
-        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{clinic.name}</td>
+        <td className="p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ border: '1px solid #e5e7eb' }}>{clinicLabel}</td>
+        <td className="p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={{ border: '1px solid #e5e7eb' }}>{clinic.name}</td>
         {[...Array(5)].flatMap((_, dayOffset: number) => {
           const date = new Date(selectedMonday);
           date.setDate(date.getDate() + dayOffset);
@@ -2834,14 +2995,13 @@ const getAssignmentForCell = (
               const assignment = getClinicAssignment(isoDate, clinic.name);
               return (
                 <td
-                  key={isoDate + slot.start + slot.end + clinic._id}
-                  className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-100 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${isDeselected ? 'bg-gray-200' : ''}`}
-                  style={{ 
-                    ...rowStyle,
-                    borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined,
-                    backgroundColor: isDeselected ? '#e5e7eb' : (assignment ? '#fef9c3' : '#fef9c3'), // Gray for deselected, yellow for normal
-                    color: '#000', // Always black text for clinics
-                    ...(isDeselected ? { position: 'relative', pointerEvents: 'none', opacity: '0.7' } : {})
+                   key={isoDate + slot.start + slot.end + clinic._id}
+                   className={`p-1 text-center truncate max-w-[70px] text-xs align-middle ${isDeselected ? 'bg-gray-200' : ''}`}
+                   style={{ 
+                     border: 'none',
+                     backgroundColor: isDeselected ? '#e5e7eb' : (assignment ? '#fef9c3' : '#fef9c3'), 
+                     color: '#000', 
+                    ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const, opacity: '0.7' } : {})
                   }}
                   onClick={(event) => {
                     if (isDeselected) return;
@@ -2871,7 +3031,7 @@ const getAssignmentForCell = (
                 </td>
               );
             } else {
-              return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}></td>;
+              return <td key={isoDate + slot.start + slot.end + clinic._id} className="p-1 text-center max-w-[70px] text-xs bg-gray-50" style={{ border: '1px solid #e5e7eb' }}></td>;
             }
           });
         })}
@@ -2882,7 +3042,7 @@ const getAssignmentForCell = (
               {/* --- Unavailable Pharmacists Row --- */}
               <tfoot>
                 <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
+                  <td colSpan={2} className="p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ border: '1px solid #e5e7eb' }}>Unavailable</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -2899,7 +3059,7 @@ const getAssignmentForCell = (
                         a.location === "Unavailable Pharmacists" &&
                         ((a.startTime <= slot.start && a.endTime > slot.start) || 
                          (a.startTime < slot.end && a.endTime >= slot.end) ||
-                         (a.startTime === slot.start && a.endTime === slot.end))
+                         (a.startTime >= slot.start && a.endTime <= slot.end))
                       ).map(a => {
                         const pharmacist = pharmacists.find((p: any) => p._id === a.pharmacistId);
                         return pharmacist || { name: "Unknown" };
@@ -2916,13 +3076,12 @@ const getAssignmentForCell = (
                       
                       return (
                         <td 
-                          key={dayOffset + '-' + slotIdx} 
-                          className={`border p-1 text-xs bg-red-50 text-red-700 text-center${!isViewOnly && !isDeselected ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
-                          style={{ 
-                            borderTop: '4px solid #9ca3af', 
-                            borderBottom: '1px solid #e5e7eb', 
-                            borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined
-                          }}
+                           key={dayOffset + '-' + slotIdx} 
+                           className={`p-1 text-xs bg-red-50 text-red-700 text-center${!effectiveViewOnly && !isDeselected ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
+                           style={{ 
+                             borderTop: 'none',
+                             borderBottom: 'none', 
+                           }}
                           onClick={(event) => {
                             if (isDeselected) return;
                             const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
@@ -2950,7 +3109,7 @@ const getAssignmentForCell = (
                 </tr>
                 {/* --- Management Time --- */}
                 <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-blue-100 z-10 truncate max-w-[120px]" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Management Time</td>
+                  <td colSpan={2} className="p-2 font-semibold bg-blue-100 z-10 truncate max-w-[120px]" style={{ border: '1px solid #e5e7eb' }}>Management Time</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
@@ -2973,17 +3132,16 @@ const getAssignmentForCell = (
                        
                        return (
                         <td
-                          key={isoDate + slot.start + slot.end + 'management'}
-                          className={`border p-1 text-center max-w-[70px] text-xs bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}${!isViewOnly && !isDeselected ? ' cursor-pointer hover:bg-blue-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`} 
-                          style={{ 
-                            borderTop: '4px solid #9ca3af', 
-                            borderBottom: '1px solid #e5e7eb', 
-                            borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined,
-                            lineHeight: '1.2', 
-                            whiteSpace: 'normal', 
-                            wordBreak: 'break-word',
-                            ...(isDeselected ? { position: 'relative', pointerEvents: 'none' } : {})
-                          }}
+                           key={isoDate + slot.start + slot.end + 'management'}
+                           className={`p-1 text-center max-w-[70px] text-xs bg-blue-50 ${!effectiveViewOnly && !isDeselected ? 'cursor-pointer hover:bg-blue-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`} 
+                           style={{ 
+                             borderTop: 'none',
+                             borderBottom: 'none', 
+                             lineHeight: '1.2', 
+                             whiteSpace: 'normal', 
+                             wordBreak: 'break-word',
+                             ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const } : {})
+                           }}
                           onClick={(event) => {
                             if (isDeselected) return;
                             const cellKey = `management-${isoDate}-${slot.start}-${slot.end}`;
@@ -3010,12 +3168,28 @@ const getAssignmentForCell = (
                   })}
                 </tr>
               </tfoot>
+              
+              {/* Add CSS for consistent borders in the PDF */}
+              <style>
+                {`
+                  .rota-table td, .rota-table th {
+                    border: 1px solid #e5e7eb;
+                  }
+                  .rota-table tbody tr:not(:last-child) td {
+                    border-bottom: 1px solid #e5e7eb;
+                  }
+                  /* Style for directorate separators in PDF */
+                  .rota-table tbody tr:last-child td {
+                    border-bottom: 1px solid #e5e7eb;
+                  }
+                `}
+              </style>
             </table>
           </div>
         </div>
       )}
       {/* Add the PharmacistSelectionModal - only shown when not in view-only mode */}
-      {!isViewOnly && showPharmacistSelection && selectedCell && (
+      {!effectiveViewOnly && showPharmacistSelection && selectedCell && (
         <PharmacistSelectionModal
           isOpen={showPharmacistSelection}
           onClose={() => {

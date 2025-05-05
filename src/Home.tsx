@@ -47,13 +47,15 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
                 Update Rota Requirements
               </button>
             )}
-            {/* Everyone can access the Create Rota feature */}
-            <button
-              className={`px-6 py-4 rounded shadow text-lg font-semibold bg-purple-600 text-white hover:bg-purple-700 ${view === "rota" ? "ring-4 ring-purple-300" : ""}`}
-              onClick={() => setView("rota")}
-            >
-              Create Rota
-            </button>
+            {/* Only admins can access the Create Rota feature */}
+            {isAdmin && (
+              <button
+                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-purple-600 text-white hover:bg-purple-700 ${view === "rota" ? "ring-4 ring-purple-300" : ""}`}
+                onClick={() => setView("rota")}
+              >
+                Create Rota
+              </button>
+            )}
             {/* View Published Rotas button for all users */}
             <button
               className={`px-6 py-4 rounded shadow text-lg font-semibold bg-yellow-500 text-white hover:bg-yellow-600 ${view === "publishedRotas" ? "ring-4 ring-yellow-300" : ""}`}
@@ -86,7 +88,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
               <RequirementsList />
             </div>
           )}
-          {view === "rota" && <RotaView />}
+          {view === "rota" && <RotaView isAdmin={isAdmin} />}
           {view === "publishedRotas" && <PublishedRotasList isAdmin={isAdmin} />}
           {view === "profile" && currentPharmacist && (
             <UserProfile pharmacist={{

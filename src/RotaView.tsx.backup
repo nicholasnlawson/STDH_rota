@@ -1,8 +1,33 @@
-import { useState, useEffect, ReactElement } from "react";
-import { useMutation, useQuery } from "convex/react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import { useQuery, useMutation } from "convex/react";
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
+import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
 import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
+import jsPDF from "jspdf";
+import html2canvas from "html2canvas";
+
+/* Custom CSS for Not Selected overlays */
+const notSelectedStyles = `
+  .not-selected-cell {
+    position: relative !important;
+    pointer-events: none !important;
+  }
+  
+  .not-selected-cell > :not(.not-selected-overlay) {
+    visibility: hidden !important;
+  }
+  
+  .not-selected-overlay {
+    position: absolute !important;
+    inset: 0 !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background-color: rgba(229, 231, 235, 0.95) !important;
+    z-index: 10 !important;
+  }
+`;
 
 const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const CLINIC_DAY_LABELS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"];
@@ -12,18 +37,22 @@ interface RotaViewProps {
   initialSelectedMonday?: string;
   initialRotaAssignments?: any[];
   initialRotaIdsByDate?: Record<string, Id<"rotas">>;
+  publishedRota?: any; // Published rota data when editing a published rota
+  onEditsChanged?: (updates: { assignments?: any[], freeCellText?: Record<string, string> }) => void;
 }
 
 export function RotaView({
   isViewOnly = false,
   initialSelectedMonday = "",
   initialRotaAssignments = [],
-  initialRotaIdsByDate = {}
-}: RotaViewProps = {}): ReactElement {
+  initialRotaIdsByDate = {},
+  publishedRota = null,
+  onEditsChanged
+}: RotaViewProps = {}): React.ReactElement {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const generateWeeklyRota = useMutation(api.rotas.generateWeeklyRota);
   const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
-  const publishRota = useMutation(api.rotas.publishRota);
+  // publishRota will be reimplemented
   const clinics = useQuery(api.clinics.listClinics) || [];
   const directorates = useQuery(api.requirements.listDirectorates) || [];
   const [selectedClinicIds, setSelectedClinicIds] = useState<Array<Id<"clinics">>>([]);
@@ -61,14 +90,183 @@ export function RotaView({
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
+  // Define all state variables needed for isDeselectedDay function upfront
+  const [freeCellText, setFreeCellText] = useState<Record<string, string>>({});
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
-  const allRotas = useQuery(api.rotas.listRotas) || [];
-  const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments);
-  const [assignmentHistory, setAssignmentHistory] = useState<any[][]>([initialRotaAssignments]);
-  const [currentHistoryIndex, setCurrentHistoryIndex] = useState<number>(0);
-  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate);
+  const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate || {});
+  const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
+  
+  // Query to get all rotas - with appropriate filter based on view mode
+  const allRotas = useQuery(api.rotas.listRotas, { status: isViewOnly ? "published" : "draft" }) || [];
+  
+  // State for tracking dynamically added EAU rows
+  const [eauAdditionalRows, setEauAdditionalRows] = useState<number[]>([]);
+  
+  // Helper function to add a new EAU row
+  const addEauRow = useCallback(() => {
+    setEauAdditionalRows(prev => [...prev, prev.length + 2]);
+  }, []);
+  
+  // Helper to check if a date corresponds to a deselected weekday - memoized to prevent infinite loops
+  const isDeselectedDay = useCallback((date: Date): boolean => {
+    try {
+      const dayLabels = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+      const dayLabel = dayLabels[date.getDay()];
+      
+      // Get the date in ISO format for lookups
+      const isoDate = date.toISOString().split('T')[0];
+      
+      // Find the corresponding rota for this date - needed in both view and edit mode
+      const rotaId = rotaIdsByDate ? rotaIdsByDate[isoDate] : null;
+      
+      // For published rotas in edit mode, we need special handling
+      if (!isViewOnly && publishedRota && publishedRota._id) {
+        // For dates that are within our published rota week, use the saved included weekdays
+        if (publishedRota.includedWeekdays && Array.isArray(publishedRota.includedWeekdays)) {
+          // If we're in edit mode for a published rota, we want to keep showing the same days
+          return !publishedRota.includedWeekdays.includes(dayLabel);
+        }
+        
+        // Otherwise, use the current selection state
+        return selectedWeekdays.indexOf(dayLabel) === -1;
+      }
+      
+      // For a specific rota (published or not), try to use its included weekdays
+      if (rotaId) {
+        const rota = allRotas.find((r: any) => r._id === rotaId);
+        if (rota) {
+          // If this rota has includedWeekdays data, use it
+          if (rota.includedWeekdays && Array.isArray(rota.includedWeekdays)) {
+            return !rota.includedWeekdays.includes(dayLabel);
+          }
+          // If the rota is missing includedWeekdays data, try to get it from the original rota
+          else if (rota.originalRotaId) {
+            const originalRota = allRotas.find((r: any) => r._id === rota.originalRotaId);
+            if (originalRota && originalRota.includedWeekdays && Array.isArray(originalRota.includedWeekdays)) {
+              return !originalRota.includedWeekdays.includes(dayLabel);
+            }
+          }
+        }
+      } else {
+        // If we can't find a rota for this day but it's a weekend (Saturday or Sunday),
+        // it's likely that it should be deselected
+        if (dayLabel === "Saturday" || dayLabel === "Sunday") {
+          return true;
+        }
+      }
+      
+      // If we haven't been able to determine from a published rota:
+      // In edit mode, use the current selectedWeekdays state
+      // In view mode, default to included (weekdays) or excluded (weekends)
+      if (!isViewOnly) {
+        return selectedWeekdays.indexOf(dayLabel) === -1;
+      } else {
+        // Default weekday selection for view mode if no published rota data available
+        return (dayLabel === "Saturday" || dayLabel === "Sunday");
+      }
+    } catch (error) {
+      console.error('[isDeselectedDay] Error determining if day is deselected:', error);
+      return false; // Default to included if there's an error
+    }
+  // We're explicitly NOT including rotaIdsByDate in the dependency array
+  // to prevent infinite loops when the function is used in effects that update rotaIdsByDate
+  }, [isViewOnly, publishedRota, selectedWeekdays]);
+  
+  // Add the custom CSS styles to the document
+  useEffect(() => {
+    // Add style tag if it doesn't exist
+    if (!document.getElementById('not-selected-styles')) {
+      const styleEl = document.createElement('style');
+      styleEl.id = 'not-selected-styles';
+      styleEl.textContent = notSelectedStyles;
+      document.head.appendChild(styleEl);
+      
+      // Cleanup style tag on unmount
+      return () => {
+        const styleEl = document.getElementById('not-selected-styles');
+        if (styleEl) {
+          document.head.removeChild(styleEl);
+        }
+      };
+    }
+  }, []);
+  
+  // Helper: Create a Not Selected overlay component for consistent display
+  const NotSelectedOverlay = React.memo(() => (
+    <div className="not-selected-overlay">
+      <span className="text-gray-500 font-medium text-xs">Not Selected</span>
+    </div>
+  ));
+  
+  // Helper function to create text input for cells
+  const createCellTextInput = (cellElement: HTMLElement, cellKey: string, currentValue: string, bgColor: string) => {
+    if (isViewOnly) return;
+    
+    // Create a contained div for our input
+    const container = document.createElement('div');
+    container.classList.add('p-1');
+    container.style.backgroundColor = bgColor;
+    
+    // Replace cell content
+    cellElement.innerHTML = '';
+    cellElement.appendChild(container);
+    
+    // Create the input
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'w-full p-1 text-xs border';
+    input.value = currentValue;
+    
+    // Add input to container
+    container.appendChild(input);
+    
+    // Focus the input
+    input.focus();
+    
+    // Handle input blur
+    input.addEventListener('blur', () => {
+      cellElement.innerHTML = '';
+      cellElement.textContent = input.value;
+      
+      // Update free text in state
+      if (input.value !== currentValue) {
+        const updatedFreeCellText = {
+          [cellKey]: input.value
+        };
+        
+        setFreeCellText(prev => ({
+          ...prev,
+          ...updatedFreeCellText
+        }));
+        
+        // If in edit mode of published rota, notify parent about changes
+        if (!isViewOnly && onEditsChanged) {
+          onEditsChanged({ freeCellText: updatedFreeCellText });
+        }
+      }
+    });
+    
+    // Handle Enter key
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        input.blur();
+      }
+    });
+  };
+
+  // In edit mode, we only want to see draft rotas
+  // These state variables have been moved to the top of the component
+  // to avoid circular dependencies with isDeselectedDay function
+  // Track ad-hoc unavailable rules added during rota generation
   const [rotaUnavailableRules, setRotaUnavailableRules] = useState<Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]>>({});
+  
+  // Track which permanent unavailable rules to ignore (when user deselects them)
+  const [ignoredUnavailableRules, setIgnoredUnavailableRules] = useState<Record<string, number[]>>({});
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
+  // Weekdays are now defined at the top of the component
+  const [bankHolidays, setBankHolidays] = useState<BankHoliday[]>([]);
+  const [bankHolidayDates, setBankHolidayDates] = useState<Record<string, string>>({});
   const [pharmacistSearch, setPharmacistSearch] = useState("");
   const [selectedCell, setSelectedCell] = useState<{
     rotaId: Id<"rotas">,
@@ -107,11 +305,6 @@ export function RotaView({
     endTime: string
   } | null>(null);
 
-  // Log rotaAssignments changes
-  useEffect(() => {
-    console.log('[useEffect rotaAssignments] Rota assignments updated:', rotaAssignments);
-  }, [rotaAssignments]);
-
   // Helper: Get all wards with directorate info
   const allWards = directorates.flatMap((d: any) => (d.wards || []).filter((w: any) => w.isActive).map((w: any) => ({...w, directorate: d.name})));
 
@@ -136,7 +329,6 @@ export function RotaView({
       a.startTime <= slot.start &&
       a.endTime >= slot.end
     );
-    console.log('[getWardAssignment]', found ? "Found:" : "Not found:", { date, ward, slot, found });
     return found;
   }
 
@@ -150,8 +342,6 @@ export function RotaView({
       a.date === date &&
       a.location === clinicName
     );
-    
-    console.log('[getClinicAssignment]', found ? "Found:" : "Not found:", { date, clinicName, found });
     return found;
   }
 
@@ -169,7 +359,6 @@ export function RotaView({
     );
     
     if (found) {
-      console.log('[getDispensaryAssignment] Found:', { date, slot, found });
       return found;
     } else {
       // Check if this is a lunch slot by trying to find a lunch cover assignment
@@ -182,7 +371,6 @@ export function RotaView({
       );
       
       if (lunchCover) {
-        console.log('[getDispensaryAssignment] Found lunch cover:', { date, slot, lunchCover });
         return lunchCover;
       }
       
@@ -197,11 +385,9 @@ export function RotaView({
       );
       
       if (overlapping) {
-        console.log('[getDispensaryAssignment] Found overlapping:', { date, slot, overlapping });
         return overlapping;
       }
       
-      console.log('[getDispensaryAssignment] Not found:', { date, slot });
       return undefined;
     }
   }
@@ -235,6 +421,45 @@ export function RotaView({
       return p.notAvailableRules.some((rule: any) => rule.dayOfWeek === dayLabel);
     });
   }
+  
+  // Helper: Get pharmacists with protected rota time for a specific day and slot
+  function getProtectedRotaTimePharmacists(dateStr: string, slot: { start: string, end: string }) {
+    const date = new Date(dateStr);
+    const dayLabel = DAYS[date.getDay()];
+    
+    return pharmacists.filter((p: any) => {
+      // Check for permanent protected rota time
+      const hasPermanentProtectedTime = p.notAvailableRules && Array.isArray(p.notAvailableRules) && 
+        p.notAvailableRules.some((rule: any) => {
+          if (rule.dayOfWeek !== dayLabel) return false;
+          
+          // Check if the permanent rule times overlap with this slot
+          const ruleStart = rule.startTime;
+          const ruleEnd = rule.endTime;
+          
+          return (ruleStart <= slot.start && ruleEnd > slot.start) || 
+                 (ruleStart < slot.end && ruleEnd >= slot.end) ||
+                 (ruleStart >= slot.start && ruleEnd <= slot.end);
+        });
+      
+      // Check for ad-hoc protected rota time set during rota creation
+      const hasAdHocProtectedTime = rotaUnavailableRules[p._id] && 
+        rotaUnavailableRules[p._id].some((rule: any) => {
+          if (rule.dayOfWeek !== dayLabel) return false;
+          
+          // Check if the ad-hoc rule times overlap with this slot
+          const ruleStart = rule.startTime;
+          const ruleEnd = rule.endTime;
+          
+          return (ruleStart <= slot.start && ruleEnd > slot.start) || 
+                 (ruleStart < slot.end && ruleEnd >= slot.end) ||
+                 (ruleStart >= slot.start && ruleEnd <= slot.end);
+        });
+      
+      // Return true if the pharmacist has either permanent or ad-hoc protected time
+      return hasPermanentProtectedTime || hasAdHocProtectedTime;
+    });
+  }
 
   // Helper: Get unavailable pharmacists for a given day
   function isPharmacistNotAvailable(pharmacist: any, dayLabel: string, slot: { start: string, end: string }) {
@@ -243,10 +468,17 @@ export function RotaView({
     );
   }
 
-  // Helper: get all unavailable rules (permanent + rota-specific)
+  // Helper: get all unavailable rules (permanent + rota-specific) excluding ignored rules
   function getAllUnavailableRules(pharmacist: any) {
+    // Get the pharmacist's permanent unavailable rules, filtering out any that are ignored
+    const permanentRules = (pharmacist.notAvailableRules || []).filter((rule: any, index: number) => {
+      const ignoredIndices = ignoredUnavailableRules[pharmacist._id] || [];
+      return !ignoredIndices.includes(index);
+    });
+    
+    // Add any ad-hoc unavailable rules specific to this rota generation
     return [
-      ...(pharmacist.notAvailableRules || []),
+      ...permanentRules,
       ...(rotaUnavailableRules[pharmacist._id] || [])
     ];
   }
@@ -264,6 +496,26 @@ export function RotaView({
       const rules = (prev[pharmacistId] || []).slice();
       rules.splice(idx, 1);
       return { ...prev, [pharmacistId]: rules };
+    });
+  }
+  
+  // Toggle a permanent unavailable rule as ignored/not ignored
+  function toggleUnavailableRule(pharmacistId: string, ruleIndex: number, ignored: boolean) {
+    setIgnoredUnavailableRules(prev => {
+      const currentIgnored = prev[pharmacistId] || [];
+      
+      if (ignored) {
+        // Add the rule index to ignored list if it's not already there
+        if (!currentIgnored.includes(ruleIndex)) {
+          return { ...prev, [pharmacistId]: [...currentIgnored, ruleIndex] };
+        }
+      } else {
+        // Remove the rule index from ignored list
+        const updated = currentIgnored.filter(idx => idx !== ruleIndex);
+        return { ...prev, [pharmacistId]: updated };
+      }
+      
+      return prev;
     });
   }
 
@@ -372,52 +624,6 @@ export function RotaView({
     });
   }, [pharmacists]);
 
-  // --- LOGGING: RotaAssignments Setter with history tracking ---
-  function setRotaAssignmentsLogged(newAssignments: any[]) {
-    console.log('[setRotaAssignments] called. New assignments:', newAssignments);
-    setRotaAssignments((prev: any[]) => {
-      const isDifferent = JSON.stringify(prev) !== JSON.stringify(newAssignments);
-      console.log('[setRotaAssignments] prev:', prev, 'isDifferent:', isDifferent);
-      
-      if (isDifferent) {
-        // Update history when assignments change
-        setAssignmentHistory(history => {
-          // Remove any future history if we're not at the most recent state
-          const newHistory = history.slice(0, currentHistoryIndex + 1);
-          // Add the new state to history
-          return [...newHistory, JSON.parse(JSON.stringify(newAssignments))];
-        });
-        
-        // Update current history index
-        setCurrentHistoryIndex(index => index + 1);
-        
-        return newAssignments;
-      } else {
-        return prev;
-      }
-    });
-  }
-
-  // --- LOGGING: Pharmacist Working Days Setter ---
-  function setPharmacistWorkingDaysLogged(newWorkingDays: Record<string, string[]>) {
-    console.log('[setPharmacistWorkingDays] called. New working days:', newWorkingDays);
-    setPharmacistWorkingDays(newWorkingDays);
-  }
-
-  // --- LOGGING: handleSetPharmacistWorkingDays ---
-  function handleSetPharmacistWorkingDays(pharmacistId: string, day: string, checked: boolean) {
-    setPharmacistWorkingDays(prev => {
-      const oldDays = prev[pharmacistId] || [];
-      let newDays: string[];
-      if (checked) {
-        newDays = [...oldDays, day];
-      } else {
-        newDays = oldDays.filter(d => d !== day);
-      }
-      return { ...prev, [pharmacistId]: newDays };
-    });
-  }
-  
   // Helper: Create a new assignment safely through the API
   const createOrUpdateAssignment = async (rotaId: Id<"rotas">, assignment: any, pharmacistId: Id<"pharmacists">) => {
     try {
@@ -441,80 +647,177 @@ export function RotaView({
     }
   };
   
-  // Handle undo action - go back to previous state
-  const handleUndo = async () => {
-    if (currentHistoryIndex > 0) {
-      // Go back one step in history
-      const prevIndex = currentHistoryIndex - 1;
-      const prevAssignments = assignmentHistory[prevIndex];
-      
-      console.log(`[handleUndo] Going back to history index ${prevIndex}`);
-      
-      // Instead of directly setting the assignments, we need to recreate them through the API
-      // to ensure the backend state matches
-      try {
-        // First, update the UI state to show we're processing
-        setRotaAssignments(prevAssignments);
-        setCurrentHistoryIndex(prevIndex);
-        
-        // No need to call API here - we'll let the normal data sync mechanisms update the data
-        // The next data fetch will pull the correct assignments anyway
-      } catch (error) {
-        console.error('[handleUndo] Error:', error);
-      }
-    } else {
-      console.log('[handleUndo] Already at oldest state, cannot undo further');
+  // Helper: Find the assignment index in the backend rota
+  const findAssignmentIndex = (rotaId: Id<"rotas">, assignment: any) => {
+    // Find the rota in allRotas
+    const rota = allRotas.find((r: any) => r._id === rotaId);
+    if (!rota || !rota.assignments) {
+      console.error('[findAssignmentIndex] Rota not found or has no assignments');
+      return -1;
     }
+    
+    // Find the assignment index
+    const index = rota.assignments.findIndex((a: any) => 
+      a.pharmacistId === assignment.pharmacistId &&
+      a.location === assignment.location &&
+      ((a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
+       (a.startTime === '00:00' && a.endTime === '23:59'))
+    );
+    
+    if (index === -1) {
+      console.error('[findAssignmentIndex] Assignment not found in rota');
+    }
+    
+    return index;
   };
   
   // Handle reset - return to original algorithm-generated rota
   const handleReset = async () => {
-    if (assignmentHistory.length > 0) {
-      // Reset to the first state in history (the original algorithm-generated rota)
-      const originalAssignments = assignmentHistory[0];
+    console.log('[handleReset] Starting reset process...');
+    
+    if (!selectedMonday) {
+      console.log('[handleReset] No selected Monday, cannot reset');
+      return;
+    }
+    
+    try {
+      // Clear all UI state first
+      setDragSource(null);
+      setDragTarget(null);
+      setShowPharmacistSelection(false);
       
-      console.log('[handleReset] Resetting to original algorithm-generated rota');
-      console.log('[handleReset] Original assignments count:', originalAssignments.length);
+      // Set loading indicator
+      setGeneratingWeekly(true);
       
-      // Instead of directly setting the assignments, first update our UI state
-      setRotaAssignments(originalAssignments);
+      console.log('[handleReset] Handling reset for rota with selectedMonday:', selectedMonday);
       
-      // Keep the original state as the first item but clear all other history
-      setAssignmentHistory([originalAssignments]);
-      setCurrentHistoryIndex(0);
-      
-      // Rather than trying to directly update assignments in the backend (which could 
-      // cause index out of bounds errors), we'll use regenerateRota to reset the entire rota
-      try {
-        if (selectedMonday) {
-          console.log('[handleReset] Regenerating rota to ensure backend consistency');
-          // Note: regenerateRota=true tells the backend to regenerate the entire rota
-          await handleGenerateWeeklyRota(singlePharmacistDispensaryDays, true);
+      // Handle reset differently based on whether we're editing a published rota
+      if (publishedRota && !isViewOnly && initialRotaAssignments && initialRotaIdsByDate) {
+        // For published rotas in edit mode, simply restore to the initial data without regenerating
+        console.log('[handleReset] Editing published rota - restoring original assignments');
+        
+        // First clear temporary changes
+        setEauAdditionalRows([]);
+        setIgnoredUnavailableRules({});
+        setRotaUnavailableRules({});
+        setFreeCellText({});
+        
+        // Restore original assignments
+        setRotaIdsByDate(initialRotaIdsByDate);
+        setRotaAssignments(initialRotaAssignments);
+        
+        // Notify parent component to ensure published rota connection is maintained
+        if (onEditsChanged) {
+          onEditsChanged({
+            assignments: initialRotaAssignments,
+            freeCellText: {}
+          });
         }
-      } catch (error) {
-        console.error('[handleReset] Error regenerating rota:', error);
+        
+        console.log('[handleReset] Reset to initial published rota assignments complete');
+      } else {
+        // For normal rotas (not editing published), regenerate completely
+        console.log('[handleReset] Standard reset - regenerating rota');
+        
+        // Clear modifications
+        setEauAdditionalRows([]);
+        setIgnoredUnavailableRules({});
+        setRotaUnavailableRules({});
+        setFreeCellText({});
+        
+        // Call the API to regenerate the rota completely
+        await handleGenerateWeeklyRota(undefined, true);
       }
-    } else {
-      console.log('[handleReset] No history available, cannot reset');
+      
+      setTimeout(() => {
+        console.log('[handleReset] Reset completed successfully.');
+      }, 500);
+      
+    } catch (error) {
+      console.error('[handleReset] Error during reset:', error);
+      alert('There was an error resetting the rota. Please try refreshing the page.');
+    } finally {
+      setTimeout(() => {
+        setGeneratingWeekly(false);
+        console.log('[handleReset] Reset process completed');
+      }, 1000);
     }
   };
 
-  // --- LOGGING: RotaAssignments Population Effect ---
+  // useEffect to populate rotaAssignments from allRotas for display or from initialRotaAssignments for editing
   useEffect(() => {
-    console.log('[useEffect][populate rotaAssignments] allRotas changed. Finding new assignments...');
+    console.log('[useEffect][populate rotaAssignments] Dependencies changed. Finding new assignments...');
+    
+    // Handle special case: when we're showing published rotas in edit mode,
+    // we should maintain the initialRotaAssignments and not recompute from allRotas
+    if (initialRotaAssignments && initialRotaAssignments.length > 0 && initialRotaIdsByDate && !isViewOnly) {
+      console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
+      // Set state in one batch to avoid flicker
+      setRotaIdsByDate(initialRotaIdsByDate);
+      setRotaAssignments(initialRotaAssignments);
+      return;
+    }
+    
+    // Always prioritize initialRotaAssignments when in edit mode - this prevents table from disappearing
+    if (!isViewOnly && initialRotaAssignments && initialRotaAssignments.length > 0) {
+      console.log(`[populate rotaAssignments] Using initialRotaAssignments for edit mode: ${initialRotaAssignments.length} assignments`);
+      // We do this check even if we already have rotaAssignments to ensure consistent state
+      if (initialRotaIdsByDate) {
+        setRotaIdsByDate(initialRotaIdsByDate);
+      }
+      setRotaAssignments(initialRotaAssignments);
+      return;
+    }
+    
+    // Don't clear existing assignments before we have new ones ready
+    if (rotaAssignments.length > 0 && allRotas.length === 0) {
+      console.log('[populate rotaAssignments] Preserving existing assignments');
+      return;
+    }
+    
     if (allRotas.length > 0) {
       // Create a map of date to rota ID
       const newRotaIdsByDate: Record<string, Id<"rotas">> = {};
       // Collect all assignments from all rotas
       const allAssignments: any[] = [];
+      // Collect all free cell text from rotas
+      const allFreeCellText: Record<string, string> = {};
 
+      // When viewing published rotas, ensure we're not adding assignments for deselected days
       for (const rota of allRotas) {
         // Normalize date to YYYY-MM-DD format
         const dateObj = new Date(rota.date);
         const dateStr = dateObj.toISOString().split('T')[0];
         newRotaIdsByDate[dateStr] = rota._id;
 
-        if (Array.isArray(rota.assignments)) {
+        // Extract weekday from the date
+        const dayOfWeek = dateObj.getDay(); // 0 = Sunday, 1 = Monday, etc.
+        const dayLabel = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dayOfWeek];
+        
+        // Check if this day should be included
+        // Special behavior for edit mode on published rotas - use selectedWeekdays
+        let isDayIncluded = true;
+        
+        // Create a date object to check if day is deselected
+        const dayDate = new Date(dateStr);
+        // Use our isDeselectedDay function for consistent behavior with the UI
+        const isDeselected = isDeselectedDay(dayDate);
+        isDayIncluded = !isDeselected;
+        
+        // Always store the mapping between dates and rota IDs, even for deselected days
+        // This is needed for the isDeselectedDay function to work correctly
+        newRotaIdsByDate[dateStr] = rota._id;
+        
+        // Process free cell text if present (even for deselected days)
+        if (rota.freeCellText && typeof rota.freeCellText === 'object') {
+          // Merge into our combined state
+          Object.entries(rota.freeCellText).forEach(([key, value]) => {
+            allFreeCellText[key] = value;
+          });
+        }
+        
+        // Only add assignments for included (not deselected) days
+        if (isDayIncluded && Array.isArray(rota.assignments)) {
           // Add date field to each assignment for easier filtering
           const assignmentsWithDate = rota.assignments.map((a: any) => ({
             ...a,
@@ -526,19 +829,15 @@ export function RotaView({
 
       setRotaIdsByDate(newRotaIdsByDate);
       
-      // If this is the initial load after generation, save it as the history's starting point
-      if (rotaGenerated && allAssignments.length > 0 && 
-          (assignmentHistory.length === 1 && assignmentHistory[0].length === 0 || 
-           assignmentHistory.length === 0)) {
-        console.log('[useEffect][populate rotaAssignments] Setting initial state for history');
-        const initialState = JSON.parse(JSON.stringify(allAssignments));
-        setAssignmentHistory([initialState]);
-        setCurrentHistoryIndex(0);
-      }
-      
-      setRotaAssignmentsLogged(allAssignments);
+      // Update UI with the assignments and free cell text
+      setRotaAssignments(allAssignments);
+      setFreeCellText(allFreeCellText); // Use the free cell text from rotas
+      console.log(`[populate rotaAssignments] Total assignments loaded: ${allAssignments.length}`);
     }
-  }, [allRotas, rotaGenerated, assignmentHistory]);
+  // We're explicitly NOT including rotaIdsByDate and rotaAssignments in the dependency array
+  // to prevent infinite loops, as we update them in the effect
+  // isViewOnly change is handled specially to ensure table never disappears
+  }, [allRotas, initialRotaAssignments, initialRotaIdsByDate, isViewOnly]);
 
   // --- LOGGING: Selected Monday and Rendered Dates ---
   useEffect(() => {
@@ -553,11 +852,51 @@ export function RotaView({
 
   // Reset singlePharmacistDispensaryDays when selectedMonday changes
   useEffect(() => {
-    setSinglePharmacistDispensaryDays([]);
-  }, [selectedMonday]);
+    if (isViewOnly) return;
+    
+    // Don't clear assignments until we have new ones
+    // Only set rotaGenerated to false to indicate we need a new generation
+    setRotaGenerated(false);
+    
+    // Detect bank holidays for the selected week
+    if (selectedMonday) {
+      const startDate = new Date(selectedMonday);
+      const endDate = new Date(selectedMonday);
+      endDate.setDate(startDate.getDate() + 6); // End of week (Sunday)
+      
+      const holidays = getBankHolidaysInRange(startDate, endDate);
+      setBankHolidays(holidays);
+      
+      // Create a mapping of date to holiday name
+      const holidayMap: Record<string, string> = {};
+      holidays.forEach(h => {
+        holidayMap[h.date] = h.title;
+      });
+      setBankHolidayDates(holidayMap);
+      
+      // Automatically deselect bank holidays
+      if (holidays.length > 0) {
+        // Map from ISO dates to weekday names
+        const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+        const holidayWeekdays = holidays.map(h => {
+          const date = new Date(h.date);
+          return dayNames[date.getDay()];
+        });
+        
+        // Update selected weekdays to exclude bank holidays
+        setSelectedWeekdays(prev => {
+          return prev.filter(day => !holidayWeekdays.includes(day));
+        });
+      }
+    }
+  }, [selectedMonday, isViewOnly]);
 
-  // Modified regeneration function to accept state override
-  // Handle publishing the rota
+  // Reimplemented publish rota function that creates a carbon copy of weekly rotas
+  const publishRota = useMutation(api.rotas.publishRota);
+  
+  // First, let's add a function to save free cell text to rotas
+  const saveFreeCellTextToRota = useMutation(api.rotas.saveFreeCellText);
+
   const handlePublishRota = async () => {
     setIsPublishing(true);
     try {
@@ -565,17 +904,72 @@ export function RotaView({
       const rotaIds = Object.values(rotaIdsByDate);
       if (rotaIds.length === 0) {
         alert("No rotas to publish");
+        setIsPublishing(false);
         return;
       }
       
-      // Publish rotas one by one, passing the actual user name from state
-      await Promise.all(rotaIds.map((rotaId) => {
-        // Pass the user's name to be stored properly
-        return publishRota({ 
-          rotaId,
-          userName: currentUser.name || currentUser.email || 'Unknown User'
-        });
-      }));
+      // First, let's save the free cell text to all rotas that will be published
+      console.log("Saving free cell text before publishing:", freeCellText);
+      
+      // Group free cell text by date
+      const textByDate: Record<string, Record<string, string>> = {};
+      
+      // For each cell text entry, extract the date from the key and group
+      Object.entries(freeCellText).forEach(([key, value]) => {
+        let dateStr = '';
+        
+        // There are different formats depending on the cell type:
+        // 1. dispensary-Dispensary-YYYY-MM-DD-start-end
+        // 2. clinic-ClinicName-YYYY-MM-DD-start-end
+        // 3. unavailable-YYYY-MM-DD-start-end (no location part)
+        // 4. management-YYYY-MM-DD-start-end (no location part)
+        
+        const parts = key.split('-');
+        
+        if (key.startsWith('unavailable-') || key.startsWith('management-')) {
+          // Extract date for unavailable/management format: type-YYYY-MM-DD-start-end
+          if (parts.length >= 4) {
+            dateStr = `${parts[1]}-${parts[2]}-${parts[3]}`;
+          }
+        } else {
+          // Extract date for dispensary/clinic format: type-location-YYYY-MM-DD-start-end
+          if (parts.length >= 5) {
+            dateStr = `${parts[2]}-${parts[3]}-${parts[4]}`;
+          }
+        }
+        
+        if (dateStr) {
+          console.log(`Extracted date ${dateStr} from key ${key}`);
+          if (!textByDate[dateStr]) {
+            textByDate[dateStr] = {};
+          }
+          textByDate[dateStr][key] = value;
+        } else {
+          console.error(`Could not extract date from key: ${key}`);
+        }
+      });
+      
+      // For each rota, save its relevant free cell text
+      for (const rotaId of rotaIds) {
+        const rotaDate = Object.entries(rotaIdsByDate).find(([date, id]) => id === rotaId)?.[0];
+        if (rotaDate && textByDate[rotaDate]) {
+          await saveFreeCellTextToRota({
+            rotaId,
+            freeCellText: textByDate[rotaDate]
+          });
+          console.log(`Saved free cell text for rota ${rotaId} (${rotaDate}):`, textByDate[rotaDate]);
+        }
+      }
+      
+      // Now publish the entire week's rotas as carbon copies (with the saved free cell text)
+      const firstRotaId = rotaIds[0];
+      const result = await publishRota({ 
+        rotaId: firstRotaId,
+        userName: currentUser.name || currentUser.email || 'Unknown User',
+        weekStartDate: selectedMonday
+      });
+      
+      console.log("Published rotas:", result);
       
       setPublishSuccess(true);
       setTimeout(() => setPublishSuccess(false), 3000); // Clear success message after 3 seconds
@@ -603,6 +997,22 @@ export function RotaView({
 
     try {
       console.log(`[handleGenerateWeeklyRota] About to call Convex mutation with startDate: ${selectedMonday}, daysToUse: ${JSON.stringify(daysToUse)}`);
+      // Create a structure for additional unavailable rules that combines ad-hoc rules
+      // with permanent rules that haven't been ignored
+      const effectiveUnavailableRules: Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]> = {};
+      
+      // For each pharmacist, prepare their effective unavailable rules
+      selectedPharmacistIds.forEach(pharmacistId => {
+        const pharmacist = pharmacists.find((p: any) => p._id === pharmacistId);
+        if (pharmacist) {
+          // Use the getAllUnavailableRules helper to get the effective rules
+          effectiveUnavailableRules[pharmacistId] = getAllUnavailableRules(pharmacist);
+        }
+      });
+
+      console.log('[handleGenerateWeeklyRota] Using effective unavailable rules:', effectiveUnavailableRules);
+      console.log('[handleGenerateWeeklyRota] Using selected weekdays:', selectedWeekdays);
+      
       await generateWeeklyRota({
         startDate: selectedMonday,
         pharmacistIds: selectedPharmacistIds,
@@ -610,6 +1020,8 @@ export function RotaView({
         pharmacistWorkingDays: pharmacistWorkingDays,
         singlePharmacistDispensaryDays: daysToUse, // Pass the determined state
         regenerateRota: regenerateRota, // Pass the regenerateRota flag
+        effectiveUnavailableRules: effectiveUnavailableRules, // Pass the composite unavailable rules
+        selectedWeekdays: selectedWeekdays, // Pass the selected weekdays to include in generation
       });
       console.log(`[handleGenerateWeeklyRota] Convex mutation call finished for startDate: ${selectedMonday}`);
     } finally {
@@ -622,6 +1034,87 @@ export function RotaView({
   console.log('Rendering rotaAssignments', rotaAssignments);
 
   // Sort clinics by dayOfWeek and startTime for display
+  // Function to generate and download a PDF of the rota
+  const handleDownloadPDF = async () => {
+    try {
+      console.log('[handleDownloadPDF] Starting PDF generation');
+      // Get the table element
+      const tableElement = document.querySelector('.rota-table');
+      if (!tableElement) {
+        console.error('[handleDownloadPDF] Table element not found');
+        return;
+      }
+      
+      // Create a loading indicator
+      const loadingDiv = document.createElement('div');
+      loadingDiv.style.position = 'fixed';
+      loadingDiv.style.top = '50%';
+      loadingDiv.style.left = '50%';
+      loadingDiv.style.transform = 'translate(-50%, -50%)';
+      loadingDiv.style.background = 'rgba(255,255,255,0.9)';
+      loadingDiv.style.padding = '20px';
+      loadingDiv.style.borderRadius = '8px';
+      loadingDiv.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
+      loadingDiv.style.zIndex = '9999';
+      loadingDiv.innerHTML = '<p style="font-weight:bold;margin:0">Generating PDF...</p>';
+      document.body.appendChild(loadingDiv);
+      
+      // Use html2canvas to capture the table as an image
+      console.log('[handleDownloadPDF] Capturing table with html2canvas');
+      const canvas = await html2canvas(tableElement as HTMLElement, {
+        scale: 1.5, // Higher quality
+        useCORS: true,
+        logging: true,
+        onclone: (clonedDoc) => {
+          // Find the cloned table and make it visible for capturing
+          const clonedTable = clonedDoc.querySelector('.rota-table');
+          if (clonedTable) {
+            (clonedTable as HTMLElement).style.overflow = 'visible';
+            (clonedTable as HTMLElement).style.width = 'auto';
+          }
+        }
+      });
+      
+      // Calculate optimal PDF page size (landscape)
+      const imgWidth = 280; // A4 width in mm (landscape)
+      const imgHeight = canvas.height * imgWidth / canvas.width;
+      
+      // Create PDF (A4 landscape)
+      const pdf = new jsPDF('landscape', 'mm', 'a4');
+      
+      // Add title
+      const weekStart = new Date(selectedMonday);
+      const weekEnd = new Date(selectedMonday);
+      weekEnd.setDate(weekEnd.getDate() + 4); // Friday
+      
+      pdf.setFontSize(16);
+      pdf.text('STDH Pharmacy Rota', 15, 15);
+      pdf.setFontSize(12);
+      pdf.text(`Week of ${weekStart.toLocaleDateString()} - ${weekEnd.toLocaleDateString()}`, 15, 22);
+      pdf.text(`Generated on ${new Date().toLocaleDateString()} at ${new Date().toLocaleTimeString()}`, 15, 28);
+      
+      // Add the table image
+      pdf.addImage(
+        canvas.toDataURL('image/jpeg', 0.95), // Use JPEG for smaller file size
+        'JPEG',
+        10, // x position
+        35, // y position
+        imgWidth, // width
+        imgHeight // height
+      );
+      
+      // Save the PDF
+      pdf.save(`STDH_Pharmacy_Rota_${selectedMonday}.pdf`);
+      console.log('[handleDownloadPDF] PDF generated and saved');
+      
+      // Remove loading indicator
+      document.body.removeChild(loadingDiv);
+    } catch (error) {
+      console.error('[handleDownloadPDF] Error generating PDF:', error);
+      alert('Error generating PDF. Please try again.');
+    }
+  };
+  
   const sortedSelectedClinics = clinics
     .filter((c: any) => selectedClinicIds.includes(c._id))
     .sort((a: any, b: any) => (a.dayOfWeek - b.dayOfWeek) || a.startTime.localeCompare(b.startTime));
@@ -692,7 +1185,7 @@ export function RotaView({
         console.error(`[getAssignmentsForScope] Rota not found in allRotas for ID: ${rotaId}`);
         return results;
       }
-
+      
       // Ensure startTime and endTime are provided for slot scope
       if (!startTime || !endTime) {
         console.error("[getAssignmentsForScope] StartTime or EndTime missing for 'slot' scope.");
@@ -946,8 +1439,23 @@ const getAssignmentForCell = (
     event.dataTransfer.setData('text/plain', pharmacistId as string);
     
     // Add visual feedback for source element
+    const cells = document.querySelectorAll('.rota-drag-cell');
+    cells.forEach(cell => {
+      const cellPharmacistId = cell.getAttribute('data-pharmacist-id');
+      const cellLocation = cell.getAttribute('data-location');
+      const cellDate = cell.getAttribute('data-date');
+      
+      if (cellPharmacistId === pharmacistId && 
+          cellLocation === location && 
+          cellDate === date) {
+        cell.classList.add('bg-yellow-100');
+      }
+    });
+  };
   
-  event.preventDefault();
+  const handleDragOver = (
+    event: React.DragEvent<HTMLTableDataCellElement>, 
+    pharmacistId: Id<"pharmacists"> | null, 
     assignment: any | null, 
     location: string, 
     date: string, 
@@ -1008,8 +1516,6 @@ const getAssignmentForCell = (
         dragSource.location === dragTarget.location &&
         dragSource.startTime === dragTarget.startTime &&
         dragSource.endTime === dragTarget.endTime) {
-      setDragSource(null);
-      setDragTarget(null);
       return;
     }
     
@@ -1021,13 +1527,265 @@ const getAssignmentForCell = (
       return;
     }
     
-    // Call the swap function
     swapPharmacists();
-    );
-
-    const otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
+  };
+  
+  const handleDragEnd = () => {
+    // Reset drag states and remove visual highlights
+    const cells = document.querySelectorAll('.rota-drag-cell');
+    cells.forEach(cell => {
+      cell.classList.remove('bg-yellow-100');
+      cell.classList.remove('bg-blue-100');
+    });
     
-    console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId} at index ${clickedAssignmentIndex}`);
+    setDragSource(null);
+    setDragTarget(null);
+  };
+  
+  // Function to swap pharmacists using the current drag source and target
+  const swapPharmacists = async () => {
+    if (!dragSource || !dragTarget || !dragTarget.pharmacistId) return;
+    
+    try {
+      console.log('[swapPharmacists] Attempting to swap:', {
+        source: {
+          pharmacistId: dragSource.pharmacistId,
+          location: dragSource.location,
+          date: dragSource.date,
+          startTime: dragSource.startTime,
+          endTime: dragSource.endTime
+        },
+        target: {
+          pharmacistId: dragTarget.pharmacistId,
+          location: dragTarget.location,
+          date: dragTarget.date,
+          startTime: dragTarget.startTime,
+          endTime: dragTarget.endTime
+        }
+      });
+      
+      // Find the source and target assignments
+      const sourceAssignment = rotaAssignments.find(a =>
+        a.pharmacistId === dragSource.pharmacistId && 
+        a.date === dragSource.date && 
+        a.location === dragSource.location &&
+        ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
+         (a.startTime === '00:00' && a.endTime === '23:59')) // Handle full-day assignments
+      );
+      
+      const targetAssignment = rotaAssignments.find(a =>
+        a.pharmacistId === dragTarget.pharmacistId && 
+        a.date === dragTarget.date && 
+        a.location === dragTarget.location &&
+        ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
+         (a.startTime === '00:00' && a.endTime === '23:59')) // Handle full-day assignments
+      );
+      
+      if (!sourceAssignment || !targetAssignment) {
+        console.error('[swapPharmacists] Could not find source or target assignment');
+        return;
+      }
+      
+      console.log('[swapPharmacists] Found assignments to swap');
+      
+      // Get the rota IDs for the source and target dates
+      const sourceRotaId = rotaIdsByDate[dragSource.date];
+      const targetRotaId = rotaIdsByDate[dragTarget.date];
+      
+      if (!sourceRotaId || !targetRotaId) {
+        console.error('[swapPharmacists] Missing rota IDs');
+        return;
+      }
+      
+      // Swap the pharmacist IDs
+      const sourcePharmacistId = dragSource.pharmacistId;
+      const targetPharmacistId = dragTarget.pharmacistId;
+      
+      console.log(`[swapPharmacists] Swapping: ${sourcePharmacistId} with ${targetPharmacistId}`);
+      
+      // Create a new array with the swapped assignments for UI update
+      const updatedAssignments = rotaAssignments.map(a => {
+        // If this is the source assignment, change its pharmacist ID to the target
+        if (a.pharmacistId === sourcePharmacistId && 
+            a.date === dragSource.date && 
+            a.location === dragSource.location &&
+            ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
+             (a.startTime === '00:00' && a.endTime === '23:59'))) {
+          return { ...a, pharmacistId: targetPharmacistId };
+        }
+        
+        // If this is the target assignment, change its pharmacist ID to the source
+        if (a.pharmacistId === targetPharmacistId && 
+            a.date === dragTarget.date && 
+            a.location === dragTarget.location &&
+            ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
+             (a.startTime === '00:00' && a.endTime === '23:59'))) {
+          return { ...a, pharmacistId: sourcePharmacistId };
+        }
+        
+        return a;
+      });
+      
+      // Update the local state first for immediate feedback (optimistic update)
+      setRotaAssignments(updatedAssignments);
+      
+      console.log('[swapPharmacists] Swap completed');
+      
+      // Find the assignment indices in the backend data
+      try {
+        console.log('[swapPharmacists] Finding assignment indices in backend data');
+        
+        // Find the source and target rotas in allRotas
+        const sourceRota = allRotas.find((r: any) => r._id === sourceRotaId);
+        const targetRota = allRotas.find((r: any) => r._id === targetRotaId);
+        
+        if (!sourceRota || !targetRota) {
+          console.error('[swapPharmacists] Could not find source or target rota in allRotas');
+          return;
+        }
+        
+        // Find the indices of the assignments in the backend data
+        const sourceIndex = sourceRota.assignments.findIndex((a: any) => 
+          a.pharmacistId === sourcePharmacistId && 
+          a.location === dragSource.location &&
+          ((a.startTime === dragSource.startTime && a.endTime === dragSource.endTime) ||
+           (a.startTime === '00:00' && a.endTime === '23:59'))
+        );
+        
+        const targetIndex = targetRota.assignments.findIndex((a: any) => 
+          a.pharmacistId === targetPharmacistId && 
+          a.location === dragTarget.location &&
+          ((a.startTime === dragTarget.startTime && a.endTime === dragTarget.endTime) ||
+           (a.startTime === '00:00' && a.endTime === '23:59'))
+        );
+        
+        console.log(`[swapPharmacists] Found indices: source=${sourceIndex}, target=${targetIndex}`);
+        
+        if (sourceIndex === -1 || targetIndex === -1) {
+          console.error('[swapPharmacists] Could not find assignment indices');
+          return;
+        }
+        
+        // Update the backend using the assignment indices
+        console.log('[swapPharmacists] Updating backend with new assignments');
+        
+        // Update the source assignment with the target pharmacist
+        await updateAssignment({
+          rotaId: sourceRotaId,
+          assignmentIndex: sourceIndex,
+          pharmacistId: targetPharmacistId
+        });
+        
+        // Update the target assignment with the source pharmacist
+        await updateAssignment({
+          rotaId: targetRotaId,
+          assignmentIndex: targetIndex,
+          pharmacistId: sourcePharmacistId
+        });
+        
+        console.log('[swapPharmacists] Swap successful!');
+      } catch (updateError) {
+        console.error('[swapPharmacists] Error updating backend:', updateError);
+        // If there's an error, revert the UI changes
+        setRotaAssignments(rotaAssignments);
+      }
+    } catch (error) {
+      console.error('[swapPharmacists] Error swapping pharmacists:', error);
+    }
+  };
+
+
+  
+  // Add handler for empty cell click
+  const handleEmptyCellClick = (location: string, type: "ward" | "dispensary" | "clinic" | "management", date: string, start: string, end: string) => {
+    const assignmentDate = new Date(date).toISOString().split('T')[0];
+    const rotaId = rotaIdsByDate[assignmentDate];
+    if (!rotaId) {
+      console.error('No rota found for date:', assignmentDate);
+      return;
+    }
+
+    setSelectedCell({ 
+      rotaId, 
+      assignmentIndices: [], 
+      currentPharmacistId: null,
+      location,
+      date: assignmentDate,
+      startTime: start,
+      endTime: end,
+      newAssignment: {
+        location,
+        type: type,
+        startTime: start,
+        endTime: end
+      }
+    });
+    setShowPharmacistSelection(true);
+  };
+
+  // Add handler for cell click - handles individual pharmacist click within multi-pharmacist cell
+  const handleCellClick = (
+    assignment: any, 
+    currentPharmacistId: Id<"pharmacists">,
+    cellStartTime: string, 
+    cellEndTime: string
+  ) => {
+    const assignmentDate = new Date(assignment.date).toISOString().split('T')[0];
+    const rotaId = rotaIdsByDate[assignmentDate];
+    if (!rotaId) {
+      console.error('No rota found for date:', assignmentDate);
+      return;
+    }
+
+    // In edit mode, we might not have the rota in allRotas, so we'll work with rotaAssignments directly
+    let clickedAssignmentIndex = -1;
+    let otherPharmacistIds: Id<"pharmacists">[] = [];
+    
+    // Try to find the rota in allRotas first
+    const rota = allRotas.find((r: any) => r._id === rotaId);
+    
+    if (rota && rota.assignments) {
+      // Regular mode: Find the clicked pharmacist's assignment index
+      clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
+        a.location === assignment.location && 
+        a.startTime === assignment.startTime && 
+        a.endTime === assignment.endTime &&
+        a.pharmacistId === currentPharmacistId
+      );
+
+      // Find all other pharmacists assigned to the same cell (same location, time, date)
+      if (clickedAssignmentIndex !== -1) {
+        const otherAssignments = rota.assignments.filter((a: any, index: number) => 
+          index !== clickedAssignmentIndex && // Not the clicked assignment
+          a.location === assignment.location && 
+          a.startTime === assignment.startTime && 
+          a.endTime === assignment.endTime
+        );
+
+        otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
+      }
+    } 
+  
+    // If we couldn't find in allRotas or clickedAssignmentIndex is -1, try rotaAssignments (edit mode)
+    if (clickedAssignmentIndex === -1) {
+      // Find other pharmacists assigned to the same cell from rotaAssignments
+      const sameSlotAssignments = rotaAssignments.filter(a => 
+        a.date === assignmentDate &&
+        a.location === assignment.location && 
+        ((a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
+         (a.start === assignment.start && a.end === assignment.end))
+      );
+      
+      // Set a dummy index for edit mode
+      clickedAssignmentIndex = 0;
+      
+      // Get other pharmacist IDs excluding the current one
+      otherPharmacistIds = sameSlotAssignments
+        .filter(a => a.pharmacistId !== currentPharmacistId)
+        .map(a => a.pharmacistId);
+    }
+    
+    console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId}`);
     console.log(`[handleCellClick] Other pharmacists in this cell: ${otherPharmacistIds.length > 0 ? otherPharmacistIds.join(', ') : 'none'}`);
 
     // Store both the selected pharmacist and other pharmacists in the cell
@@ -1037,8 +1795,8 @@ const getAssignmentForCell = (
       currentPharmacistId,
       location: assignment.location,
       date: assignmentDate,
-      startTime: cellStartTime,
-      endTime: cellEndTime,
+      startTime: cellStartTime || assignment.startTime,
+      endTime: cellEndTime || assignment.endTime,
       otherPharmacistIds // Keep track of other pharmacists in the same cell
     });
     setShowPharmacistSelection(true);
@@ -1052,6 +1810,23 @@ const getAssignmentForCell = (
   
   const newAssignment = selectedCell.newAssignment;
   console.log(`[handlePharmacistSelect] Started. Scope: ${scope}, PharmacistID: ${pharmacistId}, Location: ${selectedCell.location}, Date: ${selectedCell.date}, Start: ${selectedCell.startTime}, End: ${selectedCell.endTime}`);
+
+  // Determine what kind of cell we're editing based on location and type
+  const isUnavailable = selectedCell.location === "Unavailable Pharmacists";
+  const isManagement = selectedCell.location === "Management Time";
+  let isDispensary = false;
+  let isClinic = false;
+  
+  if (newAssignment) {
+    isDispensary = newAssignment.type === "dispensary";
+    isClinic = newAssignment.type === "clinic";
+  }
+  
+  console.log(`[handlePharmacistSelect] Cell category: ` +
+    `${isUnavailable ? 'Unavailable' : ''}` +
+    `${isManagement ? 'Management' : ''}` +
+    `${isDispensary ? 'Dispensary' : ''}` +
+    `${isClinic ? 'Clinic' : ''}`);
 
   // Log information about other pharmacists in the cell
   if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
@@ -1068,6 +1843,18 @@ const getAssignmentForCell = (
 
     if (newAssignment) {
       console.log("[handlePharmacistSelect] Handling new assignment creation.");
+      
+      // Handle specific cell types with appropriate assignment types
+      if (isUnavailable) {
+        console.log("[handlePharmacistSelect] Updating assignment for Unavailable row");
+        // Make sure we're using the right location for unavailable assignments
+        newAssignment.location = "Unavailable Pharmacists";
+      } else if (isManagement) {
+        console.log("[handlePharmacistSelect] Updating assignment for Management Time row");
+        // Make sure management time assignments are properly marked
+        newAssignment.location = "Management Time";
+      }
+      
       // For new assignments, create a new slot
       await updateAssignment({
         rotaId: selectedCell.rotaId,
@@ -1080,19 +1867,28 @@ const getAssignmentForCell = (
       // If scope is day or week, create additional slots
       if (scope !== "slot") {
         console.log(`[handlePharmacistSelect] Creating additional slots for scope: ${scope}`);
+        // Get all time slots without filtering out the selected one
         const timeSlots = TIME_SLOTS.map(slot => ({
           startTime: slot.start,
           endTime: slot.end
-        })).filter(slot => 
-          // Don't duplicate the slot we just created
-          slot.startTime !== newAssignment.startTime ||
-          slot.endTime !== newAssignment.endTime
-        );
+        }));
+        
+        // Log the time slots for debugging
+        console.log(`[handlePharmacistSelect] Using time slots:`, timeSlots.map(s => `${s.startTime}-${s.endTime}`));
 
         // For week scope, get all dates
         const dates = scope === "week" 
           ? Object.keys(rotaIdsByDate)
           : [selectedCell.date];
+          
+        // Log the dates for debugging
+        console.log(`[handlePharmacistSelect] Using dates:`, dates);
+        
+        // Keep track of dates/slots we've already created assignments for
+        // to avoid duplicating the initial assignment
+        const initialDate = selectedCell.date;
+        const initialStartTime = newAssignment.startTime;
+        const initialEndTime = newAssignment.endTime;
 
         // Create assignments for each time slot and date
         for (const date of dates) {
@@ -1103,9 +1899,18 @@ const getAssignmentForCell = (
           }
 
           for (const slot of timeSlots) {
+            // Skip the initial slot only on the initial date (to avoid duplication)
+            // but include it on other dates
+            if (date === initialDate && 
+                slot.startTime === initialStartTime && 
+                slot.endTime === initialEndTime) {
+              console.log(`[handlePharmacistSelect] Skipping initial slot on initial date: ${date} ${slot.startTime}-${slot.endTime}`);
+              continue;
+            }
+            
             await updateAssignment({
               rotaId,
-              assignmentIndex: -1,
+              assignmentIndex: -1, // Create new
               pharmacistId,
               newAssignment: {
                 location: newAssignment.location,
@@ -1273,6 +2078,20 @@ const getAssignmentForCell = (
     );
     setRotaAssignments(refreshedAssignments);
     console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
+    
+    // If in edit mode of published rota and we have a callback, notify parent about changes
+    if (!isViewOnly && onEditsChanged) {
+      // Create a record of what changed for the parent component
+      const assignmentUpdate = {
+        rotaId: selectedCell.rotaId,
+        assignmentIndex: selectedCell.assignmentIndices[0] ?? -1,
+        pharmacistId,
+        newAssignment: selectedCell.newAssignment
+      };
+      onEditsChanged({ assignments: [assignmentUpdate] });
+    }
+    
+    console.log('[handlePharmacistSelect] Edit completed');
   } catch (error) {
     console.error('[handlePharmacistSelect] Failed to update assignment:', error);
   } finally {
@@ -1284,8 +2103,8 @@ const getAssignmentForCell = (
 };
 
   return (
-    <div className="bg-white rounded-lg shadow p-6">
-      <div className="flex gap-4 mt-6">
+    <div className="mt-4 w-full" style={{ padding: 0, margin: 0, boxSizing: 'border-box' }}>
+      <div className="flex gap-4 mt-6 mx-4">
         <div>
           <label className="block font-medium mb-1">Select Monday (week start)</label>
           <input
@@ -1329,15 +2148,65 @@ const getAssignmentForCell = (
               </label>
             ))}
           </div>
+          <h3 className="font-medium mt-6 mb-2">Select Weekdays to Include in Rota</h3>
+          <p className="text-sm text-gray-600 mb-2">Deselect days for bank holidays or other special circumstances.</p>
+          <div className="flex flex-wrap gap-3 mb-4">
+            {CLINIC_DAY_LABELS.map((day) => {
+              // Check if this weekday has any bank holidays during the selected week
+              const dayIndex = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].indexOf(day);
+              const hasHoliday = selectedMonday && bankHolidays.some(h => {
+                const holidayDate = new Date(h.date);
+                return holidayDate.getDay() === dayIndex;
+              });
+              
+              // Get the holiday name if available
+              const holidayInfo = hasHoliday ? bankHolidays.find(h => {
+                const holidayDate = new Date(h.date);
+                return holidayDate.getDay() === dayIndex;
+              }) : null;
+              
+              return (
+                <button
+                  key={day}
+                  type="button"
+                  className={`px-3 py-1 rounded-full border text-sm font-medium transition-colors ${
+                    selectedWeekdays.includes(day)
+                      ? "bg-green-100 text-green-800 border-green-300"
+                      : hasHoliday
+                        ? "bg-red-50 text-red-700 border-red-200"
+                        : "bg-gray-100 text-gray-500 border-gray-300"
+                  }`}
+                  onClick={() => {
+                    setSelectedWeekdays(prev => {
+                      if (prev.includes(day)) {
+                        return prev.filter(d => d !== day);
+                      } else {
+                        return [...prev, day];
+                      }
+                    });
+                  }}
+                  title={holidayInfo ? `Bank Holiday: ${holidayInfo.title}` : ""}
+                >
+                  {day}
+                  {selectedWeekdays.includes(day) ? " ✓" : " ✗"}
+                  {hasHoliday && (
+                    <span className="ml-1 text-xs text-red-600">
+                      (Holiday: {holidayInfo?.title})
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+          </div>
           <button
-            className="mt-4 bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
-            disabled={selectedClinicIds.length === 0}
+            className="bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
+            disabled={selectedClinicIds.length === 0 || selectedWeekdays.length === 0}
             onClick={() => {
               setShowClinicSelection(false);
               setShowPharmacistSelection(true);
             }}
           >
-            Confirm Clinics
+            Confirm Clinics & Weekdays
           </button>
         </div>
       )}
@@ -1364,14 +2233,14 @@ const getAssignmentForCell = (
                             if (!pharmacistWorkingDays[pharmacist._id]) {
                               const newObj = { ...pharmacistWorkingDays };
                               newObj[pharmacist._id] = Array.isArray(pharmacist.workingDays) ? pharmacist.workingDays : CLINIC_DAY_LABELS;
-                              setPharmacistWorkingDaysLogged(newObj);
+                              setPharmacistWorkingDays(newObj);
                             }
                             return [...ids, pharmacist._id];
                           }
                           if (!checked) {
                             const newObj = { ...pharmacistWorkingDays };
                             delete newObj[pharmacist._id];
-                            setPharmacistWorkingDaysLogged(newObj);
+                            setPharmacistWorkingDays(newObj);
                             return ids.filter(id => id !== pharmacist._id);
                           }
                           return ids;
@@ -1384,7 +2253,7 @@ const getAssignmentForCell = (
                     )}
                   </div>
                   {selectedPharmacistIds.includes(pharmacist._id) && (
-                    <div className="flex flex-wrap gap-4 mt-2 md:mt-0 items-center">
+                    <div className="flex flex-wrap gap-2 items-center mb-2">
                       <div className="flex gap-2 items-center">
                         <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
                         {CLINIC_DAY_LABELS.map((day: string) => (
@@ -1393,7 +2262,13 @@ const getAssignmentForCell = (
                               type="checkbox"
                               checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
                               onChange={e => {
-                                handleSetPharmacistWorkingDays(pharmacist._id, day, e.target.checked);
+                                setPharmacistWorkingDays(prev => {
+                                  const currentDays = prev[pharmacist._id] || [];
+                                  const newDays = e.target.checked 
+                                    ? [...currentDays, day] 
+                                    : currentDays.filter(d => d !== day);
+                                  return { ...prev, [pharmacist._id]: newDays };
+                                });
                               }}
                             />
                             <span className="text-xs">{day}</span>
@@ -1402,29 +2277,36 @@ const getAssignmentForCell = (
                       </div>
                       <div className="flex items-center gap-2 ml-4">
                         <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
-                        <ul className="flex gap-2 mb-0">
-                          {getAllUnavailableRules(pharmacist).map((rule, idx) => (
-                            <li key={idx} className="flex items-center gap-1 text-xs bg-red-50 rounded px-1">
+                        <ul className="flex flex-wrap gap-2 mb-0">
+                          {/* Show permanent rules with toggle option */}
+                          {(pharmacist.notAvailableRules || []).map((rule: {dayOfWeek: string, startTime: string, endTime: string}, idx: number) => {
+                            const ignored = (ignoredUnavailableRules[pharmacist._id] || []).includes(idx);
+                            return (
+                              <li key={`perm-${idx}`} 
+                                  className={`flex items-center gap-1 text-xs rounded px-1 ${ignored ? 'bg-gray-200 text-gray-500' : 'bg-red-50'}`}>
+                                <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
+                                {/* Toggle button - only action for permanent rules */}
+                                <button
+                                  type="button"
+                                  className={`text-xs ml-1 ${ignored ? 'text-green-500' : 'text-orange-500'}`}
+                                  title={ignored ? 'Enable this rule' : 'Disable this rule'}
+                                  onClick={() => toggleUnavailableRule(pharmacist._id, idx, !ignored)}
+                                >
+                                  {ignored ? '⟲' : '⏸'}
+                                </button>
+                              </li>
+                            );
+                          })}
+                          
+                          {/* Show ad-hoc rules */}
+                          {(rotaUnavailableRules[pharmacist._id] || []).map((rule: {dayOfWeek: string, startTime: string, endTime: string}, idx: number) => (
+                            <li key={`adhoc-${idx}`} className="flex items-center gap-1 text-xs bg-orange-50 rounded px-1">
                               <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
                               <button
                                 type="button"
                                 className="text-red-500 text-xs ml-1"
-                                onClick={() => {
-                                  if (idx < (pharmacist.notAvailableRules?.length || 0)) {
-                                    const updated = [...(pharmacist.notAvailableRules || [])];
-                                    updated.splice(idx, 1);
-                                    setRotaUnavailableRules(prev => ({
-                                      ...prev,
-                                      [pharmacist._id]: [
-                                        ...((prev[pharmacist._id] || [])),
-                                        ...updated.filter((_, i) => i !== idx)
-                                      ]
-                                    }));
-                                    pharmacist.notAvailableRules.splice(idx, 1);
-                                  } else {
-                                    removeRotaUnavailableRule(pharmacist._id, idx - (pharmacist.notAvailableRules?.length || 0));
-                                  }
-                                }}
+                                title="Delete this rule"
+                                onClick={() => removeRotaUnavailableRule(pharmacist._id, idx)}
                               >✕</button>
                             </li>
                           ))}
@@ -1510,7 +2392,7 @@ const getAssignmentForCell = (
                                     newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
                                   }
                                   
-                                  setPharmacistWorkingDaysLogged(newObj);
+                                  setPharmacistWorkingDays(newObj);
                                 }}
                                 disabled={isViewOnly}
                               >
@@ -1558,33 +2440,36 @@ const getAssignmentForCell = (
           </button>
         </div>
       )}
-      {rotaGenerated && (
-        <div className="mt-10">
-          <div className="flex justify-between items-center mb-4">
+      {(rotaGenerated || (rotaAssignments.length > 0 && selectedMonday)) && (
+        <div className="mt-10" style={{ width: '100%', margin: 0, padding: 0 }}>
+          <div className="flex justify-between items-center mb-4 mx-4">
             <h3 className="text-xl font-bold">Weekly Rota Table</h3>
             <div className="flex items-center space-x-2">
               {publishSuccess && (
-                <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded">
+                <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded mr-2">
                   Rota published successfully!
                 </span>
               )}
-              <div className="flex space-x-2">
+              
+              {/* Download PDF button - only show when viewing a published rota */}
+              {(isViewOnly || publishedRota) && (
                 <button
-                  className="bg-gray-600 text-white px-4 py-2 rounded hover:bg-gray-700 disabled:opacity-50 flex items-center"
-                  onClick={handleUndo}
-                  disabled={currentHistoryIndex === 0 || isViewOnly}
-                  title="Undo the last change"
+                  onClick={handleDownloadPDF}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded flex items-center mr-2"
+                  title="Download PDF of rota"
                 >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
-                    <path fillRule="evenodd" d="M9.707 14.707a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 1.414L7.414 9H15a1 1 0 110 2H7.414l2.293 2.293a1 1 0 010 1.414z" clipRule="evenodd" />
+                  <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
                   </svg>
-                  Undo
+                  Download PDF
                 </button>
-                
+              )}
+              
+              <div className="flex space-x-2">
                 <button
                   className="bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 flex items-center"
                   onClick={handleReset}
-                  disabled={currentHistoryIndex === 0 || isViewOnly}
+                  disabled={isViewOnly}
                   title="Reset to original rota"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
@@ -1594,27 +2479,45 @@ const getAssignmentForCell = (
                 </button>
                 
                 <button
-                  className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 flex items-center"
-                  onClick={handlePublishRota}
-                  disabled={isPublishing || isViewOnly}
+                  className="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700 disabled:opacity-50 flex items-center"
+                  onClick={addEauRow}
+                  disabled={isViewOnly}
+                  title="Add an additional EAU pharmacist row"
                 >
-                  {isPublishing ? (
-                    <>
-                      <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-                      </svg>
-                      Publishing...
-                    </>
-                  ) : "Publish Rota"}
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 5a1 1 0 011 1v3h3a1 1 0 110 2h-3v3a1 1 0 11-2 0v-3H6a1 1 0 110-2h3V6a1 1 0 011-1z" clipRule="evenodd" />
+                  </svg>
+                  Add EAU Row
                 </button>
+                
+                {/* Only show the Publish Rota button when not editing an already published rota */}
+                {!publishedRota && (
+                  <button
+                    className="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700 disabled:opacity-50 flex items-center"
+                    onClick={handlePublishRota}
+                    disabled={isPublishing || isViewOnly}
+                  >
+                    {isPublishing ? (
+                      <>
+                        <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                        </svg>
+                        Publishing...
+                      </>
+                    ) : "Publish Rota"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
           {/* Dispensary Mode Toggles */}
-          <div className="mb-4">
-            {[0,1,2,3,4].map((dayOffset: number) => {
+          <div className="mb-4 mx-4">
+            {selectedMonday && [0,1,2,3,4].map((dayOffset: number) => {
+              // Ensure selectedMonday is valid before creating date objects
               const date = new Date(selectedMonday);
+              if (isNaN(date.getTime())) return null; // Skip if date is invalid
+              
               date.setDate(date.getDate() + dayOffset);
               const isoDate = date.toISOString().split('T')[0];
               
@@ -1676,8 +2579,8 @@ const getAssignmentForCell = (
             })}
           </div>
           
-          <div className="overflow-x-auto w-full max-w-full">
-            <table className="border text-xs md:text-sm table-fixed w-full">
+          <div style={{ width: 'calc(100vw - 8px)', maxWidth: 'calc(100vw - 8px)', overflow: 'auto', position: 'relative' as const, left: '50%', right: '50%', marginLeft: 'calc(-50vw + 4px)', marginRight: 'calc(-50vw + 4px)' }}>
+            <table className="w-full border border-gray-300 mb-4 rota-table" style={{ tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '120px' }} />
                 <col style={{ width: '120px' }} />
@@ -1693,7 +2596,7 @@ const getAssignmentForCell = (
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     return (
-                      <th key={dayOffset} colSpan={TIME_SLOTS.length} className="border p-2 bg-gray-100 text-xs border-r-4 border-gray-400 border-b border-gray-200" style={{ borderBottomWidth: 1 }}>
+                      <th key={dayOffset} colSpan={TIME_SLOTS.length} className="border p-2 bg-gray-100 text-xs border-b border-gray-200" style={{ borderBottomWidth: 1 }}>
                         {DAYS[date.getDay()]}<br/>{date.toLocaleDateString()}
                       </th>
                     );
@@ -1704,8 +2607,8 @@ const getAssignmentForCell = (
                   {[...Array(5)].flatMap((_, dayIdx: number) =>
                     TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => (
                       <th key={dayIdx + '-' + slot.start + '-' + slot.end}
-                        className={`border p-2 bg-blue-50 text-xs${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
-                        style={{ borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}
+                        className="border p-2 bg-blue-50 text-xs"
+                        style={{ borderBottom: '1px solid #e5e7eb' }}
                       >
                         {slot.start}-{slot.end}
                       </th>
@@ -1714,22 +2617,71 @@ const getAssignmentForCell = (
                 </tr>
               </thead>
               <tbody>
-  {allWards.flatMap((ward: any, idx: number, arr: any[]) => {
+
+
+  {allWards.flatMap((ward: any, idx: number, arr: any[]): React.ReactNode[] => {
+    // Log each ward name to debug EAU detection
+    console.log(`Ward ${idx}: ${ward.name} (${ward.directorate})`);
+    
     // Check if this is the last ward in a directorate
     const isLastInDirectorate = idx < arr.length - 1 && ward.directorate !== arr[idx + 1].directorate;
     
     // Apply directorate separator style
-    const rowStyle = isLastInDirectorate ? { borderBottom: '4px solid #9ca3af' } : { borderBottom: '1px solid #e5e7eb' };
+    // Use box-shadow instead of border for directorate separators to make it hang under the cell for PDF output
+    const rowStyle = isLastInDirectorate 
+      ? { 
+          borderBottom: '1px solid #e5e7eb', 
+          boxShadow: 'inset 0 -4px 0 -1px #9ca3af', // This makes the border hang below the cell
+          position: 'relative' as const,
+          zIndex: 1
+        } 
+      : { borderBottom: '1px solid #e5e7eb' };
     
-    return (
+    // Check if this is the EAU ward - use very explicit detection to catch all possible forms
+    const isEAU = ward.name === "EAU" || 
+                  ward.name === "Emergency Assessment Unit" ||
+                  ward.name.includes("EAU") || 
+                  ward.name.includes("Emergency") ||
+                  ward.name.includes("Assessment") ||
+                  ward.directorate.includes("Emergency");
+    
+    // Log if we identified an EAU ward
+    if (isEAU) {
+      console.log(`EAU ward detected: ${ward.name}`);
+    }
+    
+    // Create an array to hold both the regular ward row and potentially the "Add New" row
+    const rows = [];
+    
+    // Add the regular ward row
+    rows.push(
       <tr key={ward.directorate + ward.name} className={idx % 2 === 1 ? 'bg-gray-50' : ''}>
         <td className="border p-2 font-semibold sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{ward.directorate}</td>
-        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>{ward.name}</td>
+        <td className="border p-2 sticky left-0 bg-white z-10 truncate max-w-[120px]" style={rowStyle}>
+          {ward.name}
+          {isEAU && (
+            <button 
+              onClick={(e) => {
+                e.stopPropagation();
+                addEauRow();
+                console.log("Adding EAU row");
+              }} 
+              className="ml-2 inline-flex items-center justify-center rounded bg-blue-500 text-white px-2 py-0.5 text-xs font-bold hover:bg-blue-600 focus:outline-none"
+              title="Add additional EAU pharmacist row"
+            >
+              + Add
+            </button>
+          )}
+        </td>
         {[...Array(5)].flatMap((_, dayOffset: number) => {
           const date = new Date(selectedMonday);
           date.setDate(date.getDate() + dayOffset);
           const isoDate = date.toISOString().split('T')[0];
           return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
+            // Check if this day is deselected in the current rota generation
+            const dayDate = new Date(date);
+            const isDeselected = isDeselectedDay(dayDate);
+            
             // Get assignments specifically for this date
             const assignmentsForDate = rotaAssignments.filter(a => a.date === isoDate);
             // Determine the assignments to display in this cell using the standardized logic
@@ -1740,10 +2692,20 @@ const getAssignmentForCell = (
             return (
               <td
                 key={isoDate + slot.start + slot.end + ward.name}
-                className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-gray-100' : ''} ${!isViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''}`}
-                style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word', overflow: 'hidden' }}
-                onClick={() => displayAssignments.length === 0 && handleEmptyCellClick(ward.name, "ward", isoDate, slot.start, slot.end)}
-                onDragOver={(e) => displayAssignments.length > 0 && handleDragOver(e, displayAssignments[0].pharmacistId, displayAssignments[0], ward.name, isoDate, slot.start, slot.end)}
+                className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-gray-100' : ''} ${!isViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'bg-gray-200' : ''}`}
+                style={{ 
+                  ...rowStyle, 
+                  // No special border for last slot 
+                  height: '2.5em', 
+                  minHeight: '2.5em', 
+                  lineHeight: '1.2', 
+                  whiteSpace: 'normal', 
+                  wordBreak: 'break-word', 
+                  overflow: 'hidden',
+                  ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const, opacity: '0.7' } : {})
+                }}
+                onClick={() => !isDeselected && displayAssignments.length === 0 && handleEmptyCellClick(ward.name, "ward", isoDate, slot.start, slot.end)}
+                onDragOver={(e) => !isDeselected && displayAssignments.length > 0 && handleDragOver(e, displayAssignments[0].pharmacistId, displayAssignments[0], ward.name, isoDate, slot.start, slot.end)}
                 onDragLeave={handleDragLeave}
                 onDrop={handleDrop}
                 data-pharmacist-id={displayAssignments.length > 0 ? displayAssignments.map(a => a.pharmacistId).join(',') : ''}
@@ -1751,14 +2713,25 @@ const getAssignmentForCell = (
                 data-date={isoDate}
                 data-start-time={slot.start}
                 data-end-time={slot.end}
+                data-deselected={isDeselected ? 'true' : 'false'}
               >
+                {isDeselected ? (
+                  <div className="absolute top-0 left-0 flex items-center justify-center h-full w-full bg-gray-300 z-10" style={{ opacity: 0.95 }}>
+                    <span className="text-gray-700 font-medium text-xs">Not Selected</span>
+                  </div>
+                ) : null}
+                
+                {/* Only render assignments if not deselected or to keep DOM consistent but hidden */}
                 {displayAssignments.length > 0 ? (
                   <div className="flex flex-col w-full h-full">
                     {displayAssignments.map((assignment, index) => (
                       <div 
                         key={`${assignment.pharmacistId}-${index}`}
                         className={`${getPharmacistCellClass(assignment.pharmacistId)} w-full p-1 flex items-center justify-center ${!isViewOnly ? 'cursor-grab' : ''}`}
-                        style={{ height: `${100 / displayAssignments.length}%`, borderTop: index > 0 ? '1px solid rgba(0,0,0,0.1)' : 'none' }}
+                        style={{
+                          height: `${100 / displayAssignments.length}%`, 
+                          borderTop: index > 0 ? '1px solid rgba(0,0,0,0.1)' : 'none'
+                        }}
                         draggable={!isViewOnly}
                         onClick={(e) => {
                           e.stopPropagation(); // Prevent cell click from triggering
@@ -1780,6 +2753,86 @@ const getAssignmentForCell = (
         })}
       </tr>
     );
+    
+
+    // If this is the EAU ward, add any dynamically created additional rows
+    if (isEAU && eauAdditionalRows.length > 0) {
+      // Add each additional EAU row
+      eauAdditionalRows.forEach((rowNum) => {
+        rows.push(
+          <tr key={ward.directorate + ward.name + "-additional-" + rowNum} className="bg-blue-50">
+            <td className="border p-2 font-semibold sticky left-0 bg-blue-50 z-10 truncate max-w-[120px]" style={rowStyle}></td>
+            <td className="border p-2 sticky left-0 bg-blue-50 z-10 truncate max-w-[120px]" style={rowStyle}>
+              EAU {rowNum}
+            </td>
+            {[...Array(5)].flatMap((_, dayOffset: number) => {
+              const date = new Date(selectedMonday);
+              date.setDate(date.getDate() + dayOffset);
+              const isoDate = date.toISOString().split('T')[0];
+              return TIME_SLOTS.map((slot: { start: string; end: string }, slotIdx: number) => {
+                // Check if this day is deselected in the current rota generation
+                const dayDate = new Date(date);
+                const isDeselected = isDeselectedDay(dayDate);
+                
+                // Get assignments specifically for this date and row
+                const rowName = `${ward.name} Additional ${rowNum}`;
+                const assignmentsForDate = rotaAssignments.filter(a => a.date === isoDate && a.location === rowName);
+                const displayAssignments = getAssignmentsForCell(rowName, isoDate, slot.start, slot.end, assignmentsForDate);
+                
+                return (
+                  <td
+                    key={isoDate + slot.start + slot.end + rowName}
+                    className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-blue-100' : ''} ${!isViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'not-selected-cell' : ''}`}
+                    style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word', overflow: 'hidden' }}
+                    onClick={() => displayAssignments.length === 0 && handleEmptyCellClick(rowName, "ward", isoDate, slot.start, slot.end)}
+                    onDragOver={(e) => displayAssignments.length > 0 && handleDragOver(e, displayAssignments[0].pharmacistId, displayAssignments[0], rowName, isoDate, slot.start, slot.end)}
+                    onDragLeave={handleDragLeave}
+                    onDrop={handleDrop}
+                    data-pharmacist-id={displayAssignments.length > 0 ? displayAssignments.map(a => a.pharmacistId).join(',') : ''}
+                    data-location={rowName}
+                    data-date={isoDate}
+                    data-start-time={slot.start}
+                    data-end-time={slot.end}
+                    data-deselected={isDeselected ? 'true' : 'false'}
+                  >
+                    {isDeselected ? (
+                      <div className="flex items-center justify-center h-full w-full bg-gray-200">
+                        <span className="text-gray-500 font-medium text-xs">Not Selected</span>
+                      </div>
+                    ) : displayAssignments.length > 0 ? (
+                      <div className="flex flex-col w-full h-full">
+                        {displayAssignments.map((assignment, index) => (
+                          <div 
+                            key={`${assignment.pharmacistId}-${index}`}
+                            className={`${getPharmacistCellClass(assignment.pharmacistId)} w-full p-1 flex items-center justify-center ${!isViewOnly ? 'cursor-grab' : ''}`}
+                            style={{ height: `${100 / displayAssignments.length}%`, borderTop: index > 0 ? '1px solid rgba(0,0,0,0.1)' : 'none' }}
+                            draggable={!isViewOnly}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end);
+                            }}
+                            onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, rowName, isoDate, slot.start, slot.end)}
+                            onDragEnd={handleDragEnd}
+                          >
+                            <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
+                              {getPharmacistName(assignment.pharmacistId)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <span className="text-blue-700">+</span>
+                    )}
+                  </td>
+                );
+              });
+            })}
+          </tr>
+        );
+      });
+    }
+    
+    return rows;
   })}                
 
   {/* --- Dispensary --- */}
@@ -1789,6 +2842,10 @@ const getAssignmentForCell = (
       const date = new Date(selectedMonday);
       date.setDate(date.getDate() + dayOffset);
       const isoDate = date.toISOString().split('T')[0];
+      // Check if this day is deselected in the current rota generation
+      const dayDate = new Date(date);
+      const isDeselected = isDeselectedDay(dayDate);
+      
       return TIME_SLOTS.map((slot, slotIdx) => {
         const assignment = getDispensaryAssignment(isoDate, slot);
         let displayName = '';
@@ -1803,17 +2860,46 @@ const getAssignmentForCell = (
         return (
           <td
             key={dayOffset + '-' + slotIdx}
-            className={`border p-1 text-xs bg-gray-50 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'}`}
-            style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
-            onClick={() => assignment ? handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end) : handleEmptyCellClick("Dispensary", "dispensary", isoDate, slot.start, slot.end)}
+            className={`border p-1 text-xs bg-gray-50 font-semibold ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
+            style={{ 
+              borderTop: '4px solid #9ca3af', 
+              borderBottom: '1px solid #e5e7eb', 
+              // No special border for last slot 
+              height: '2.5em', 
+              minHeight: '2.5em', 
+              lineHeight: '1.2', 
+              whiteSpace: 'normal', 
+              wordBreak: 'break-word'
+            }}
+            onClick={(event) => {
+              if (isDeselected) return;
+              const cellKey = `dispensary-${isoDate}-${slot.start}-${slot.end}`;
+              const currentText = freeCellText[cellKey] || (displayName ? displayName + (isLunch ? " (lunch cover)" : "") : "");
+              createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#f9fafb'); // Light gray background
+            }}
           >
-            {displayName && (
-              <div className="text-center">
-                <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
-                  {displayName}{isLunch && " (lunch cover)"}
-                </span>
-              </div>
-            )}
+            {(() => {
+              // Show "Not Selected" if the day is deselected
+              if (isDeselected) {
+                return <NotSelectedOverlay />;
+              }
+              
+              // Show either the free text or the pharmacist name
+              const cellKey = `dispensary-${isoDate}-${slot.start}-${slot.end}`;
+              const defaultText = displayName ? (
+                <div className="text-center">
+                  <span className={assignment && hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
+                    {displayName}{isLunch && " (lunch cover)"}
+                  </span>
+                </div>
+              ) : null;
+              
+              return freeCellText[cellKey] ? (
+                <div className="text-center">
+                  <span>{freeCellText[cellKey]}</span>
+                </div>
+              ) : defaultText;
+            })()}
           </td>
         );
       });
@@ -1847,30 +2933,53 @@ const getAssignmentForCell = (
             const slotEnd = slot.end;
             const overlaps =
               slotStart < clinic.endTime && slotEnd > clinic.startTime;
+            
+            // Check if this day is deselected in the current rota generation
+            const dayDate = new Date(date);
+            const isDeselected = isDeselectedDay(dayDate);
+            
             if (isClinicDay && overlaps) {
               // Get clinic assignment for this date
               const assignment = getClinicAssignment(isoDate, clinic.name);
               return (
                 <td
                   key={isoDate + slot.start + slot.end + clinic._id}
-                  className={`border p-1 text-center truncate max-w-[70px] text-xs bg-yellow-100 font-semibold${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`}
+                  className={`border p-1 text-center truncate max-w-[70px] text-xs align-middle ${isDeselected ? 'bg-gray-200' : ''}`}
                   style={{ 
-                    ...rowStyle,
-                    borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined,
-                    backgroundColor: assignment ? '#fef9c3' : '#fef9c3', // Maintain yellow background
-                    color: '#000' // Always black text for clinics
+                    borderBottom: '1px solid #e5e7eb', // Standard thin border for all cells
+                    backgroundColor: isDeselected ? '#e5e7eb' : (assignment ? '#fef9c3' : '#fef9c3'), // Gray for deselected, yellow for normal
+                    color: '#000', // Always black text for clinics
+                    ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const, opacity: '0.7' } : {})
                   }}
-                  onClick={() => assignment && handleCellClick(assignment, assignment.pharmacistId, slot.start, slot.end)}
+                  onClick={(event) => {
+                    if (isDeselected) return;
+                    const cellKey = `clinic-${clinic.name}-${isoDate}-${slot.start}-${slot.end}`;
+                    const currentText = freeCellText[cellKey] || (assignment ? getPharmacistName(assignment.pharmacistId) : "");
+                    createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#fef9c3'); // Yellow background
+                  }}
                 >
-                  {assignment ? (
-                    <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
-                      {getPharmacistName(assignment.pharmacistId)}
-                    </span>
-                  ) : ""}
+                  {(() => {
+                    // Show "Not Selected" if the day is deselected
+                    if (isDeselected) {
+                      return <NotSelectedOverlay />;
+                    }
+                    
+                    // Show either the free text or the clinic assignment
+                    const cellKey = `clinic-${clinic.name}-${isoDate}-${slot.start}-${slot.end}`;
+                    if (freeCellText[cellKey]) {
+                      return <span>{freeCellText[cellKey]}</span>;
+                    }
+                    
+                    return assignment ? (
+                      <span className={hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : 'text-black font-bold'}>
+                        {getPharmacistName(assignment.pharmacistId)}
+                      </span>
+                    ) : "";
+                  })()}
                 </td>
               );
             } else {
-              return <td key={isoDate + slot.start + slot.end + clinic._id} className={`border p-1 text-center max-w-[70px] text-xs bg-gray-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}></td>;
+              return <td key={isoDate + slot.start + slot.end + clinic._id} className="border p-1 text-center max-w-[70px] text-xs bg-gray-50" style={{ ...rowStyle }}></td>;
             }
           });
         })}
@@ -1881,23 +2990,66 @@ const getAssignmentForCell = (
               {/* --- Unavailable Pharmacists Row --- */}
               <tfoot>
                 <tr>
-                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
+                  <td colSpan={2} className="border p-2 font-semibold bg-red-50 text-red-700 sticky left-0 z-10" style={{ borderBottom: '1px solid #e5e7eb' }}>Unavailable</td>
                   {[0,1,2,3,4].flatMap((dayOffset: number) => {
                     const date = new Date(selectedMonday);
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
                     return TIME_SLOTS.map((slot, slotIdx) => {
-                      // For this slot, get pharmacists unavailable at this day/slot
-                      const unavailable = pharmacists.filter((p: any) => {
-                        if (!p.notAvailableRules || !Array.isArray(p.notAvailableRules)) return false;
-                        return p.notAvailableRules.some((rule: any) =>
-                          rule.dayOfWeek === DAYS[date.getDay()] &&
-                          !(rule.endTime <= slot.start || rule.startTime >= slot.end)
-                        );
+                      // Check if this day is deselected in the current rota generation
+                      const dayDate = new Date(date);
+                      const isDeselected = isDeselectedDay(dayDate);
+                      
+                      // Find unavailable pharmacists for this date/slot
+                      const unavailable = rotaAssignments.filter(a => 
+                        a.type === "unavailable" && 
+                        a.date === isoDate && 
+                        a.location === "Unavailable Pharmacists" &&
+                        ((a.startTime <= slot.start && a.endTime > slot.start) || 
+                         (a.startTime < slot.end && a.endTime >= slot.end) ||
+                         (a.startTime >= slot.start && a.endTime <= slot.end))
+                      ).map(a => {
+                        const pharmacist = pharmacists.find((p: any) => p._id === a.pharmacistId);
+                        return pharmacist || { name: "Unknown" };
                       });
+                      
+                      // Also get pharmacists with protected rota time for this date/slot
+                      const protectedTimePharmacists = getProtectedRotaTimePharmacists(isoDate, slot);
+                      
+                      // Combine both lists
+                      const allUnavailablePharmacists = [
+                        ...unavailable,
+                        ...protectedTimePharmacists
+                      ];
+                      
                       return (
-                        <td key={dayOffset + '-' + slotIdx} className="border p-1 text-xs bg-red-50 text-red-700 text-center" style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined }}>
-                          {unavailable.map((p: any) => p.name).join(', ') || ''}
+                        <td 
+                          key={dayOffset + '-' + slotIdx} 
+                          className={`border p-1 text-xs bg-red-50 text-red-700 text-center${!isViewOnly && !isDeselected ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
+                          style={{ 
+                            borderTop: '4px solid #9ca3af', 
+                            borderBottom: '1px solid #e5e7eb', 
+                          }}
+                          onClick={(event) => {
+                            if (isDeselected) return;
+                            const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
+                            const currentText = freeCellText[cellKey] || allUnavailablePharmacists.map((p: any) => p.name || p.displayName || 'Unknown').join(', ');
+                            createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#fee2e2'); // Light red background
+                          }}
+                        >
+                          {(() => {
+                            if (isDeselected) {
+                              return (
+                                <div className="flex items-center justify-center h-full w-full">
+                                  <span className="text-gray-500 font-medium text-xs">Not Selected</span>
+                                </div>
+                              );
+                            }
+                            // Show either the free text or the unavailable pharmacist names
+                            const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
+                            const defaultText = allUnavailablePharmacists.map((p: any) => p.name || p.displayName || 'Unknown').join(', ');
+                            return freeCellText[cellKey] || defaultText || '';
+                          })()}
                         </td>
                       );
                     });
@@ -1922,22 +3074,65 @@ const getAssignmentForCell = (
                       
                       // Get pharmacist names
                       const pharmacistNames = managementAssignments.map(a => getPharmacistName(a.pharmacistId)).filter(Boolean);
-                      
-                      return (
+                                            // Check if this day is deselected in the current rota generation
+                       const dayDate = new Date(date);
+                       const isDeselected = isDeselectedDay(dayDate);
+                       
+                       return (
                         <td
                           key={isoDate + slot.start + slot.end + 'management'}
-                          className={`border p-1 text-center max-w-[70px] text-xs bg-blue-50${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''}`} 
-                          style={{ borderTop: '4px solid #9ca3af', borderBottom: '1px solid #e5e7eb', borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word' }}
+                          className={`border p-1 text-center max-w-[70px] text-xs bg-blue-50 ${!isViewOnly && !isDeselected ? 'cursor-pointer hover:bg-blue-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`} 
+                          style={{ 
+                            borderTop: '4px solid #9ca3af', 
+                            borderBottom: '1px solid #e5e7eb', 
+                            // No special border for last slot
+                            lineHeight: '1.2', 
+                            whiteSpace: 'normal', 
+                            wordBreak: 'break-word',
+                            ...(isDeselected ? { position: 'relative' as const, pointerEvents: 'none' as const } : {})
+                          }}
+                          onClick={(event) => {
+                            if (isDeselected) return;
+                            const cellKey = `management-${isoDate}-${slot.start}-${slot.end}`;
+                            const currentText = freeCellText[cellKey] || pharmacistNames.join(", ");
+                            createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#e0f2fe'); // Light blue background
+                          }}
                         >
-                          {pharmacistNames.length > 0 ? (
-                            <span>{pharmacistNames.join(", ")}</span>
-                          ) : null}
+                          {(() => {
+                            if (isDeselected) {
+                              return (
+                                <div className="flex items-center justify-center h-full w-full">
+                                  <span className="text-gray-500 font-medium text-xs">Not Selected</span>
+                                </div>
+                              );
+                            }
+                            // Show either the free text or the pharmacist names
+                            const cellKey = `management-${isoDate}-${slot.start}-${slot.end}`;
+                            const cellText = freeCellText[cellKey] || (pharmacistNames.length > 0 ? pharmacistNames.join(", ") : "");
+                            return cellText ? <span>{cellText}</span> : null;
+                          })()}
                         </td>
                       );
                     });
                   })}
                 </tr>
               </tfoot>
+              
+              {/* Add CSS for consistent borders in the PDF */}
+              <style>
+                {`
+                  .rota-table td, .rota-table th {
+                    border: 1px solid #e5e7eb;
+                  }
+                  .rota-table tbody tr:not(:last-child) td {
+                    border-bottom: 1px solid #e5e7eb;
+                  }
+                  /* Style for directorate separators in PDF */
+                  .rota-table tbody tr:last-child td {
+                    border-bottom: 1px solid #e5e7eb;
+                  }
+                `}
+              </style>
             </table>
           </div>
         </div>
