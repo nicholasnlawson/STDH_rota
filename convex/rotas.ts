@@ -4067,7 +4067,43 @@ export const saveFreeCellText = mutation({
     return { success: true };
   }
 });
+// New mutation to update only the pharmacist for a specific assignment ID
+export const updatePharmacistForAssignment = mutation({
+  args: {
+    assignmentId: v.id("rotaAssignments"),
+    newPharmacistId: v.id("pharmacists"),
+    rotaId: v.id("rotas"), // Include rotaId to potentially update the parent rota's lastEdited or similar
+  },
+  handler: async (ctx, args) => {
+    const { assignmentId, newPharmacistId, rotaId } = args;
 
+    // Fetch the assignment to ensure it exists
+    const assignment = await ctx.db.get(assignmentId);
+    if (!assignment) {
+      throw new Error(`Assignment with ID ${assignmentId} not found.`);
+    }
+
+    // Check if the rota exists and if the assignment belongs to it (optional, but good practice)
+    const rota = await ctx.db.get(rotaId);
+    if (!rota) {
+      throw new Error(`Rota with ID ${rotaId} not found.`);
+    }
+    // This check assumes rotaAssignments are stored directly or referenced in a way
+    // that can be validated. If assignments are sub-documents, this check needs adjustment.
+    // For now, we'll trust the rotaId passed from the client is correct.
+
+    // Update the pharmacistId for the specific assignment
+    await ctx.db.patch(assignmentId, { pharmacistId: newPharmacistId });
+
+    // Optionally, update the parent rota document (e.g., lastEdited timestamp)
+    // This depends on your application's needs.
+    await ctx.db.patch(rotaId, { lastEdited: new Date().toISOString() });
+    
+    console.log(`[updatePharmacistForAssignment] Updated assignment ${assignmentId} to pharmacist ${newPharmacistId} in rota ${rotaId}`);
+
+    return { success: true, updatedAssignmentId: assignmentId };
+  },
+});
 export const updateRotaAssignment = mutation({
   args: {
     rotaId: v.id("rotas"),
@@ -4127,40 +4163,131 @@ export const updateRotaAssignment = mutation({
 export const archiveRotas = mutation({
   args: { 
     weekStartDate: v.string(),
+    archiveAll: v.optional(v.boolean())
   },
   handler: async (ctx, args) => {
-    const { weekStartDate } = args;
-    
-    // Helper to get Monday for a given date string
-    function getWeekStartDate(dateStr: string) {
-      const d = new Date(dateStr);
-      const day = d.getDay();
-      // 0=Sunday, 1=Monday, ...
-      const diff = (day === 0 ? -6 : 1) - day; // If Sunday, go back 6 days, else back to Monday
-      d.setDate(d.getDate() + diff);
-      return d.toISOString().split('T')[0];
+    const { weekStartDate, archiveAll = false } = args;
+        
+    // Query for rotas to archive
+    let weekRotas;
+    if (archiveAll) {
+      // Archive all rotas for this week
+      weekRotas = await ctx.db
+        .query("rotas")
+        .filter(q => q.eq(q.field("status"), "published"))
+        .collect();
+    } else {
+      // Archive only the specific week
+      weekRotas = await ctx.db
+        .query("rotas")
+        .filter(q => 
+          q.and(
+            q.eq(q.field("status"), "published"),
+            q.gte(q.field("date"), weekStartDate),
+            q.lt(q.field("date"), addDays(weekStartDate, 7))
+          )
+        )
+        .collect();
     }
-
-    // Get all rotas for the given week
-    const allRotas = await ctx.db.query("rotas").collect();
-    const weekRotas = allRotas.filter(r => {
-      if (!r.date) return false;
-      const rWeekStart = getWeekStartDate(r.date);
-      return rWeekStart === weekStartDate && r.status === "published";
-    });
-
-    if (weekRotas.length === 0) {
-      throw new Error("No published rotas found for the specified week");
+        
+    console.log(`[archiveRotas] Archiving ${weekRotas.length} rotas`);
+        
+    // Update all matching rotas to 'archived' status
+    for (const rota of weekRotas) {
+      await ctx.db.patch(rota._id, { status: "archived" });
     }
-
-    // Archive all rotas for the week
-    await Promise.all(
-      weekRotas.map(rota => ctx.db.patch(rota._id, { status: "archived" }))
-    );
-
+        
     console.log(`[archiveRotas] Archived ${weekRotas.length} rotas for week starting ${weekStartDate}`);
-    
+        
     // Return the IDs of the archived rotas
     return weekRotas.map(rota => rota._id);
   },
+});
+
+// Save rota configuration to allow resuming work later
+export const saveRotaConfiguration = mutation({
+  args: {
+    weekStartDate: v.string(), // Monday date in YYYY-MM-DD format
+    selectedClinicIds: v.array(v.id("clinics")),
+    selectedPharmacistIds: v.array(v.id("pharmacists")),
+    selectedWeekdays: v.array(v.string()),
+    pharmacistWorkingDays: v.record(v.string(), v.array(v.string())),
+    singlePharmacistDispensaryDays: v.array(v.string()),
+    ignoredUnavailableRules: v.optional(v.record(v.string(), v.array(v.number()))),
+    rotaUnavailableRules: v.optional(v.record(v.string(), v.array(v.object({
+      dayOfWeek: v.string(),
+      startTime: v.string(),
+      endTime: v.string()
+    })))),
+    userName: v.optional(v.string()),
+    isGenerated: v.boolean() // Whether a rota has been generated using this configuration
+  },
+  handler: async (ctx, args) => {
+    console.log(`[saveRotaConfiguration] Saving configuration for week starting: ${args.weekStartDate}`);
+        
+    // Check if a configuration for this week already exists
+    const existingConfig = await ctx.db
+      .query("rotaConfigurations")
+      .withIndex("by_weekStartDate", q => q.eq("weekStartDate", args.weekStartDate))
+      .first();
+        
+    // If configuration exists, update it
+    if (existingConfig) {
+      console.log(`[saveRotaConfiguration] Updating existing configuration for ${args.weekStartDate}`);
+      return ctx.db.patch(existingConfig._id, {
+        selectedClinicIds: args.selectedClinicIds,
+        selectedPharmacistIds: args.selectedPharmacistIds,
+        selectedWeekdays: args.selectedWeekdays,
+        pharmacistWorkingDays: args.pharmacistWorkingDays,
+        singlePharmacistDispensaryDays: args.singlePharmacistDispensaryDays,
+        ignoredUnavailableRules: args.ignoredUnavailableRules || {},
+        rotaUnavailableRules: args.rotaUnavailableRules || {},
+        lastModified: Date.now(),
+        lastModifiedBy: args.userName || "Unknown user",
+        rotaGeneratedAt: args.isGenerated ? Date.now() : existingConfig.rotaGeneratedAt,
+        isGenerated: args.isGenerated || existingConfig.isGenerated
+      });
+    }
+        
+    // Otherwise, create a new configuration
+    console.log(`[saveRotaConfiguration] Creating new configuration for ${args.weekStartDate}`);
+    return ctx.db.insert("rotaConfigurations", {
+      weekStartDate: args.weekStartDate,
+      selectedClinicIds: args.selectedClinicIds,
+      selectedPharmacistIds: args.selectedPharmacistIds,
+      selectedWeekdays: args.selectedWeekdays,
+      pharmacistWorkingDays: args.pharmacistWorkingDays,
+      singlePharmacistDispensaryDays: args.singlePharmacistDispensaryDays,
+      ignoredUnavailableRules: args.ignoredUnavailableRules || {},
+      rotaUnavailableRules: args.rotaUnavailableRules || {},
+      lastModified: Date.now(),
+      lastModifiedBy: args.userName || "Unknown user",
+      rotaGeneratedAt: args.isGenerated ? Date.now() : undefined,
+      isGenerated: args.isGenerated
+    });
+  }
+});
+
+// Retrieve a saved rota configuration for a specific week
+export const getRotaConfiguration = query({
+  args: {
+    weekStartDate: v.string() // Monday date in YYYY-MM-DD format
+  },
+  handler: async (ctx, args) => {
+    console.log(`[getRotaConfiguration] Looking for configuration for week starting: ${args.weekStartDate}`);
+        
+    // Look up configuration for this week
+    const config = await ctx.db
+      .query("rotaConfigurations")
+      .withIndex("by_weekStartDate", q => q.eq("weekStartDate", args.weekStartDate))
+      .first();
+        
+    if (config) {
+      console.log(`[getRotaConfiguration] Found configuration for ${args.weekStartDate}`);
+    } else {
+      console.log(`[getRotaConfiguration] No configuration found for ${args.weekStartDate}`);
+    }
+        
+    return config;
+  }
 });

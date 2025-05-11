@@ -7,6 +7,7 @@ import { AdminPage } from "./AdminPage";
 import { PublishedRotasList } from "./PublishedRotasList";
 import { useMutation, useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { Id } from "../convex/_generated/dataModel";
 import { UserProfile } from "./UserProfile";
 

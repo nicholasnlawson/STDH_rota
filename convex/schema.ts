@@ -114,6 +114,26 @@ const applicationTables = {
       v.literal("general")
     ),
   }),
+
+  // Store rota configurations by week to allow resuming work
+  rotaConfigurations: defineTable({
+    weekStartDate: v.string(), // Monday date in YYYY-MM-DD format
+    selectedClinicIds: v.array(v.id("clinics")),
+    selectedPharmacistIds: v.array(v.id("pharmacists")),
+    selectedWeekdays: v.array(v.string()),
+    pharmacistWorkingDays: v.record(v.string(), v.array(v.string())),
+    singlePharmacistDispensaryDays: v.array(v.string()),
+    ignoredUnavailableRules: v.optional(v.record(v.string(), v.array(v.number()))),
+    rotaUnavailableRules: v.optional(v.record(v.string(), v.array(v.object({
+      dayOfWeek: v.string(),
+      startTime: v.string(),
+      endTime: v.string()
+    })))),
+    lastModified: v.number(),
+    lastModifiedBy: v.optional(v.string()),
+    rotaGeneratedAt: v.optional(v.number()), // Timestamp of last generation
+    isGenerated: v.boolean(), // Whether a rota has been generated for this configuration
+  }).index("by_weekStartDate", ["weekStartDate"]),
 };
 
 export default defineSchema({

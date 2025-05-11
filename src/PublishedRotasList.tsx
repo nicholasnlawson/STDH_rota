@@ -23,17 +23,12 @@ export function PublishedRotasList({ isAdmin = false }: PublishedRotasListProps)
   const [viewingWeekStart, setViewingWeekStart] = useState<string | null>(null);
   const [deleteConfirmWeek, setDeleteConfirmWeek] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [editedRotaAssignments, setEditedRotaAssignments] = useState<any[]>([]);
-  const [editedFreeCellText, setEditedFreeCellText] = useState<Record<string, string>>({});
-  const [isSaving, setIsSaving] = useState(false);
   
   // Fetch pharmacists for name lookup
   const pharmacists = useQuery(api.pharmacists.list) || [];
   
   const archiveRotas = useMutation(api.rotas.archiveRotas);
-  const updateAssignment = useMutation(api.rotas.updateRotaAssignment);
-  const saveFreeCellText = useMutation(api.rotas.saveFreeCellText);
+  // Removed edit-related mutations
   // Fetch all rotas
   const rotas = useQuery(api.rotas.listRotas, {}) || [];
 
@@ -80,78 +75,6 @@ export function PublishedRotasList({ isAdmin = false }: PublishedRotasListProps)
 
   // All rotas for the selected week
   const viewingWeekRotas = viewingWeekStart ? publishedRotasByWeek[viewingWeekStart] || [] : [];
-  
-  // Function to handle saving edited rota
-  const handleSaveEdits = async () => {
-    if (!viewingWeekStart || viewingWeekRotas.length === 0) return;
-    
-    setIsSaving(true);
-    try {
-      // 1. Save all assignment changes
-      for (const assignment of editedRotaAssignments) {
-        if (!assignment.rotaId || !assignment.assignmentIndex) continue;
-        
-        await updateAssignment({
-          rotaId: assignment.rotaId,
-          assignmentIndex: assignment.assignmentIndex,
-          pharmacistId: assignment.pharmacistId,
-          newAssignment: assignment.newAssignment
-        });
-      }
-      
-      // 2. Save free cell text for each rota
-      for (const rota of viewingWeekRotas) {
-        // Only process the relevant subset of free cell text for this rota
-        const rotaDate = new Date(rota.date);
-        const isoDate = rotaDate.toISOString().split('T')[0];
-        
-        // Filter free cell text that belongs to this rota's date
-        const rotaFreeCellText: Record<string, string> = {};
-        Object.entries(editedFreeCellText).forEach(([key, value]) => {
-          if (key.includes(isoDate)) {
-            rotaFreeCellText[key] = value;
-          }
-        });
-        
-        // If we have any free text for this rota, save it
-        if (Object.keys(rotaFreeCellText).length > 0) {
-          await saveFreeCellText({
-            rotaId: rota._id,
-            freeCellText: rotaFreeCellText
-          });
-        }
-      }
-      
-      // Success notification
-      alert('Rota changes saved successfully!');
-      // Exit edit mode
-      setIsEditMode(false);
-      // Reset edited state
-      setEditedRotaAssignments([]);
-      setEditedFreeCellText({});
-    } catch (error) {
-      console.error('Error saving rota changes:', error);
-      alert(`Error saving changes: ${error}`);
-    } finally {
-      setIsSaving(false);
-    }
-  };
-  
-  // Handler for receiving changes from the RotaView component
-  const handleRotaUpdates = (updates: { assignments?: any[], freeCellText?: Record<string, string> }) => {
-    if (updates.assignments && Array.isArray(updates.assignments) && updates.assignments.length > 0) {
-      setEditedRotaAssignments(prev => {
-        // Create a new array with previous assignments
-        const newAssignments = prev.slice();
-        // Add the new assignments
-        updates.assignments?.forEach(assignment => newAssignments.push(assignment));
-        return newAssignments;
-      });
-    }
-    if (updates.freeCellText) {
-      setEditedFreeCellText(prev => ({ ...prev, ...updates.freeCellText }));
-    }
-  };
   
   // Handle deleting a rota
   const handleDeleteRota = async () => {
@@ -205,42 +128,10 @@ export function PublishedRotasList({ isAdmin = false }: PublishedRotasListProps)
         <div className="flex justify-between items-center mb-4 px-4">
           <h2 className="text-2xl font-semibold">Rota for week starting {viewingWeekStart}</h2>
           <div className="flex space-x-2">
-            {isAdmin && !isEditMode && (
-              <button
-                className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-                onClick={() => setIsEditMode(true)}
-              >
-                Edit Rota
-              </button>
-            )}
-            {isEditMode && (
-              <button
-                className="px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 transition-colors"
-                onClick={handleSaveEdits}
-                disabled={isSaving}
-              >
-                {isSaving ? 'Saving...' : 'Save Changes'}
-              </button>
-            )}
-            {isEditMode && (
-              <button
-                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
-                onClick={() => {
-                  if (confirm('Are you sure you want to discard your changes?')) {
-                    setIsEditMode(false);
-                    setEditedRotaAssignments([]);
-                    setEditedFreeCellText({});
-                  }
-                }}
-                disabled={isSaving}
-              >
-                Cancel
-              </button>
-            )}
+            {/* Edit functionality removed - published rotas are now view-only */}
             <button
               className="px-4 py-2 bg-gray-300 rounded hover:bg-gray-400"
               onClick={() => setViewingWeekStart(null)}
-              disabled={isSaving}
             >
               Close
             </button>
@@ -271,12 +162,12 @@ export function PublishedRotasList({ isAdmin = false }: PublishedRotasListProps)
         
         {/* Display the rota using RotaView in view-only or edit mode */}
         <RotaView 
-          isViewOnly={!isEditMode}
+          isViewOnly={true} /* Always view-only for published rotas */
           initialSelectedMonday={viewingWeekStart}
           initialRotaAssignments={allAssignments}
           initialRotaIdsByDate={rotaIdsByDate}
           publishedRota={viewingWeekStart && publishedRotasByWeek[viewingWeekStart] ? publishedRotasByWeek[viewingWeekStart][0] : null} /* Pass the first rota from current week for proper weekday handling */
-          onEditsChanged={isEditMode ? handleRotaUpdates : undefined}
+          /* Removed onEditsChanged handler as edit functionality is removed */
         />
       </div>
     );

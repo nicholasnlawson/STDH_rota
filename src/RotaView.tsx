@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { useQuery, useMutation } from "convex/react";
+import { useQuery, useMutation, useConvex } from "convex/react"; // Ensure useConvex is imported here
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
 import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
@@ -72,6 +72,8 @@ export function RotaView({
   // publishRota will be reimplemented
   const clinics = useQuery(api.clinics.listClinics) || [];
   const directorates = useQuery(api.requirements.listDirectorates) || [];
+  const convex = useConvex(); // Initialize convex client at the top level
+  const saveRotaConfiguration = useMutation(api.rotas.saveRotaConfiguration);
   const [selectedClinicIds, setSelectedClinicIds] = useState<Array<Id<"clinics">>>([]);
   const [selectedPharmacistIds, setSelectedPharmacistIds] = useState<Array<Id<"pharmacists">>>(() => {
     // Preselect default pharmacists
@@ -83,6 +85,7 @@ export function RotaView({
   const [showPharmacistSelection, setShowPharmacistSelection] = useState(false);
   const [rotaGenerated, setRotaGenerated] = useState(effectiveViewOnly || false);
   const [isPublishing, setIsPublishing] = useState(false);
+  const [hasExistingConfig, setHasExistingConfig] = useState(false); // New state for existing config
   const [publishSuccess, setPublishSuccess] = useState(false);
   // Track current user for tracking metadata when publishing
   const [currentUser, setCurrentUser] = useState<{name: string, email: string}>(() => {
@@ -869,14 +872,51 @@ export function RotaView({
 
   // Reset singlePharmacistDispensaryDays when selectedMonday changes
   useEffect(() => {
-    if (isViewOnly) return;
+    if (effectiveViewOnly) return;
     
     // Don't clear assignments until we have new ones
     // Only set rotaGenerated to false to indicate we need a new generation
     setRotaGenerated(false);
+    setHasExistingConfig(false); // Reset when Monday changes
     
     // Detect bank holidays for the selected week
     if (selectedMonday) {
+      // Load existing configuration for this week
+      const loadConfiguration = async () => {
+        try {
+          console.log('[RotaView] Loading configuration for week starting:', selectedMonday);
+          // Use convex.query directly here
+          const config = await convex.query(api.rotas.getRotaConfiguration, { weekStartDate: selectedMonday });
+          
+          if (config) {
+            console.log('[RotaView] Found saved configuration:', config);
+            
+            // Restore saved configuration
+            setSelectedClinicIds(config.selectedClinicIds);
+            setSelectedPharmacistIds(config.selectedPharmacistIds);
+            setSelectedWeekdays(config.selectedWeekdays);
+            setPharmacistWorkingDays(config.pharmacistWorkingDays);
+            setSinglePharmacistDispensaryDays(config.singlePharmacistDispensaryDays);
+            setIgnoredUnavailableRules(config.ignoredUnavailableRules || {});
+            setRotaUnavailableRules(config.rotaUnavailableRules || {});
+            
+            // If configuration has a generated rota, set rotaGenerated to true
+            if (config.isGenerated) {
+              setRotaGenerated(true);
+            }
+            setHasExistingConfig(true); // Set true if config is found
+          } else {
+            console.log('[RotaView] No saved configuration found, using defaults');
+          }
+        } catch (error) {
+          console.error('[RotaView] Error loading configuration:', error);
+          setHasExistingConfig(false); // Ensure it's false on error
+        }
+      };
+      
+      loadConfiguration();
+      
+      // Process bank holidays
       const startDate = new Date(selectedMonday);
       const endDate = new Date(selectedMonday);
       endDate.setDate(startDate.getDate() + 6); // End of week (Sunday)
@@ -906,7 +946,7 @@ export function RotaView({
         });
       }
     }
-  }, [selectedMonday, effectiveViewOnly]);
+  }, [selectedMonday, effectiveViewOnly, convex]); // Added convex to dependency array
 
   // Reimplemented publish rota function that creates a carbon copy of weekly rotas
   const publishRota = useMutation(api.rotas.publishRota);
@@ -1030,6 +1070,31 @@ export function RotaView({
       console.log('[handleGenerateWeeklyRota] Using effective unavailable rules:', effectiveUnavailableRules);
       console.log('[handleGenerateWeeklyRota] Using selected weekdays:', selectedWeekdays);
       
+      // Save the configuration before generating the rota
+      try {
+        // Get current user info for tracking
+        const userName = currentUser?.name || currentUser?.email || 'Unknown User';
+        
+        await saveRotaConfiguration({
+          weekStartDate: selectedMonday,
+          selectedClinicIds,
+          selectedPharmacistIds,
+          selectedWeekdays,
+          pharmacistWorkingDays,
+          singlePharmacistDispensaryDays: daysToUse,
+          ignoredUnavailableRules,
+          rotaUnavailableRules,
+          userName,
+          isGenerated: true // Mark that we're generating a rota with this configuration
+        });
+        
+        console.log(`[handleGenerateWeeklyRota] Configuration saved for week starting: ${selectedMonday}`);
+      } catch (configError) {
+        console.error('[handleGenerateWeeklyRota] Error saving configuration:', configError);
+        // Continue with generation even if saving config fails
+      }
+      
+      // Generate the rota
       await generateWeeklyRota({
         startDate: selectedMonday,
         pharmacistIds: selectedPharmacistIds,
@@ -2177,11 +2242,33 @@ const getAssignmentForCell = (
           className="bg-blue-600 text-white px-3 py-2 rounded mt-6 disabled:opacity-50"
           disabled={!selectedMonday || generatingWeekly}
           onClick={() => {
+            // Keep track of current configuration
+            if (selectedMonday) {
+              // Save current configuration when starting rota creation
+              try {
+                const userName = currentUser?.name || currentUser?.email || 'Unknown User';
+                saveRotaConfiguration({
+                  weekStartDate: selectedMonday,
+                  selectedClinicIds,
+                  selectedPharmacistIds,
+                  selectedWeekdays,
+                  pharmacistWorkingDays, 
+                  singlePharmacistDispensaryDays,
+                  ignoredUnavailableRules,
+                  rotaUnavailableRules,
+                  userName,
+                  isGenerated: false // Not generated yet
+                });
+              } catch (error) {
+                console.error('Error saving configuration:', error);
+              }
+            }
+            
             setShowClinicSelection(true);
             setRotaGenerated(false);
           }}
         >
-          Create Rota
+          {hasExistingConfig ? 'Update Rota Details' : 'Create Rota'}
         </button>
       </div>
       {showClinicSelection && !rotaGenerated && (
@@ -2311,73 +2398,41 @@ const getAssignmentForCell = (
                   </div>
                   {selectedPharmacistIds.includes(pharmacist._id) && (
                     <div className="flex flex-wrap gap-2 items-center mb-2">
-                      <div className="flex gap-2 items-center">
-                        <span className="font-semibold text-xs whitespace-nowrap mr-1">Working Days:</span>
-                        {CLINIC_DAY_LABELS.map((day: string) => (
-                          <label key={day} className="flex items-center gap-1">
-                            <input
-                              type="checkbox"
-                              checked={pharmacistWorkingDays[pharmacist._id]?.includes(day) || false}
-                              onChange={e => {
-                                setPharmacistWorkingDays(prev => {
-                                  const currentDays = prev[pharmacist._id] || [];
-                                  const newDays = e.target.checked 
-                                    ? [...currentDays, day] 
-                                    : currentDays.filter(d => d !== day);
-                                  return { ...prev, [pharmacist._id]: newDays };
-                                });
-                              }}
-                            />
-                            <span className="text-xs">{day}</span>
-                          </label>
-                        ))}
-                      </div>
-                      <div className="flex items-center gap-2 ml-4">
-                        <span className="font-semibold text-xs whitespace-nowrap">Protected Rota Time:</span>
-                        <ul className="flex flex-wrap gap-2 mb-0">
-                          {/* Show permanent rules with toggle option */}
-                          {(pharmacist.notAvailableRules || []).map((rule: {dayOfWeek: string, startTime: string, endTime: string}, idx: number) => {
-                            const ignored = (ignoredUnavailableRules[pharmacist._id] || []).includes(idx);
-                            return (
-                              <li key={`perm-${idx}`} 
-                                  className={`flex items-center gap-1 text-xs rounded px-1 ${ignored ? 'bg-gray-200 text-gray-500' : 'bg-red-50'}`}>
-                                <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
-                                {/* Toggle button - only action for permanent rules */}
-                                <button
-                                  type="button"
-                                  className={`text-xs ml-1 ${ignored ? 'text-green-500' : 'text-orange-500'}`}
-                                  title={ignored ? 'Enable this rule' : 'Disable this rule'}
-                                  onClick={() => toggleUnavailableRule(pharmacist._id, idx, !ignored)}
-                                >
-                                  {ignored ? '⟲' : '⏸'}
-                                </button>
-                              </li>
-                            );
-                          })}
-                          
-                          {/* Show ad-hoc rules */}
-                          {(rotaUnavailableRules[pharmacist._id] || []).map((rule: {dayOfWeek: string, startTime: string, endTime: string}, idx: number) => (
-                            <li key={`adhoc-${idx}`} className="flex items-center gap-1 text-xs bg-orange-50 rounded px-1">
-                              <span>{rule.dayOfWeek} {rule.startTime}-{rule.endTime}</span>
-                              <button
-                                type="button"
-                                className="text-red-500 text-xs ml-1"
-                                title="Delete this rule"
-                                onClick={() => removeRotaUnavailableRule(pharmacist._id, idx)}
-                              >✕</button>
-                            </li>
-                          ))}
-                        </ul>
-                        <select className="border rounded text-xs" id={`unavail-day-${pharmacist._id}`}>{CLINIC_DAY_LABELS.map(day => <option key={day} value={day}>{day}</option>)}</select>
-                        <input className="border rounded text-xs w-20" id={`unavail-start-${pharmacist._id}`} type="time" defaultValue="09:00" />
-                        <input className="border rounded text-xs w-20" id={`unavail-end-${pharmacist._id}`} type="time" defaultValue="17:00" />
-                        <button type="button" className="text-blue-600 text-xs border px-1 rounded" onClick={() => {
-                          const day = (document.getElementById(`unavail-day-${pharmacist._id}`) as HTMLSelectElement).value;
-                          const start = (document.getElementById(`unavail-start-${pharmacist._id}`) as HTMLInputElement).value;
-                          const end = (document.getElementById(`unavail-end-${pharmacist._id}`) as HTMLInputElement).value;
-                          addRotaUnavailableRule(pharmacist._id, { dayOfWeek: day, startTime: start, endTime: end });
-                        }}>Add</button>
-                      </div>
+                      <span className="text-sm font-medium">Available on:</span>
+                      {CLINIC_DAY_LABELS.map((day: string) => {
+                        const isSelected = pharmacistWorkingDays[pharmacist._id]?.includes(day) || false;
+                        return (
+                          <button
+                            key={day}
+                            type="button"
+                            className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                              isSelected 
+                                ? "bg-green-100 text-green-800 border border-green-300" 
+                                : "bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200"
+                            }`}
+                            onClick={() => {
+                              // Create a temporary working days state for this pharmacist
+                              const newObj = { ...pharmacistWorkingDays };
+                              if (!newObj[pharmacist._id]) {
+                                newObj[pharmacist._id] = [...pharmacistWorkingDays[pharmacist._id]];
+                              }
+                              
+                              if (isSelected) {
+                                // Remove day if already selected
+                                newObj[pharmacist._id] = newObj[pharmacist._id].filter(d => d !== day);
+                              } else {
+                                // Add day if not selected
+                                newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
+                              }
+                              
+                              setPharmacistWorkingDays(newObj);
+                            }}
+                            disabled={effectiveViewOnly}
+                          >
+                            {day}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -2398,10 +2453,8 @@ const getAssignmentForCell = (
                 <h4 className="font-medium mb-2">Search Results</h4>
                 {[...pharmacists]
                   .filter((p: any) => 
-                    // Only show non-default pharmacists that aren't already selected
                     !p.isDefaultPharmacist &&
                     !selectedPharmacistIds.includes(p._id) &&
-                    // Filter by search text if provided
                     (pharmacistSearch === '' || p.name.toLowerCase().includes(pharmacistSearch.toLowerCase()))
                   )
                   .sort((a: any, b: any) => a.name.localeCompare(b.name))
@@ -2636,7 +2689,9 @@ const getAssignmentForCell = (
             })}
           </div>
           
-          <div style={{ width: 'calc(100vw - 8px)', maxWidth: 'calc(100vw - 8px)', overflow: 'auto', position: 'relative' as const, left: '50%', right: '50%', marginLeft: 'calc(-50vw + 4px)', marginRight: 'calc(-50vw + 4px)' }}>
+          {/* Only display the rota table when in view-only mode or after the rota has been generated */}
+          {(effectiveViewOnly || rotaGenerated) && (
+            <div style={{ width: 'calc(100vw - 8px)', maxWidth: 'calc(100vw - 8px)', overflow: 'auto', position: 'relative' as const, left: '50%', right: '50%', marginLeft: 'calc(-50vw + 4px)', marginRight: 'calc(-50vw + 4px)' }}>
             <table className="w-full border border-gray-300 mb-4 rota-table" style={{ tableLayout: 'fixed' }}>
               <colgroup>
                 <col style={{ width: '120px' }} />
@@ -2837,7 +2892,7 @@ const getAssignmentForCell = (
                 const displayAssignments = getAssignmentsForCell(rowName, isoDate, slot.start, slot.end, assignmentsForDate);
                 
                 return (
-                  <td
+                  <td 
                     key={isoDate + slot.start + slot.end + rowName}
                     className={`border ${displayAssignments.length > 0 ? 'p-0' : 'p-1'} text-center truncate max-w-[70px] text-xs align-middle whitespace-normal${slotIdx === TIME_SLOTS.length - 1 ? ' border-r-4 border-gray-400' : ''} ${displayAssignments.length === 0 ? 'cursor-pointer hover:bg-blue-100' : ''} ${!effectiveViewOnly && displayAssignments.length > 0 ? 'rota-drag-cell' : ''} ${isDeselected ? 'not-selected-cell' : ''}`}
                     style={{ ...rowStyle, borderRight: slotIdx === TIME_SLOTS.length - 1 ? '4px solid #9ca3af' : undefined, height: '2.5em', minHeight: '2.5em', lineHeight: '1.2', whiteSpace: 'normal', wordBreak: 'break-word', overflow: 'hidden' }}
@@ -2853,7 +2908,7 @@ const getAssignmentForCell = (
                     data-deselected={isDeselected ? 'true' : 'false'}
                   >
                     {isDeselected ? (
-                      <div className="flex items-center justify-center h-full w-full bg-gray-200">
+                      <div className="flex items-center justify-center h-full w-full">
                         <span className="text-gray-500 font-medium text-xs">Not Selected</span>
                       </div>
                     ) : displayAssignments.length > 0 ? (
@@ -2920,7 +2975,7 @@ const getAssignmentForCell = (
             className={`p-1 text-xs bg-gray-50 font-semibold ${assignment ? getPharmacistCellClass(assignment.pharmacistId) : 'cursor-pointer hover:bg-gray-100'} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
             style={{ 
               borderTop: 'none',
-              borderBottom: 'none',
+              borderBottom: 'none', 
               height: '2.5em', 
               minHeight: '2.5em', 
               lineHeight: '1.2', 
@@ -3048,15 +3103,10 @@ const getAssignmentForCell = (
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
                     return TIME_SLOTS.map((slot, slotIdx) => {
-                      // Check if this day is deselected in the current rota generation
-                      const dayDate = new Date(date);
-                      const isDeselected = isDeselectedDay(dayDate);
-                      
                       // Find unavailable pharmacists for this date/slot
                       const unavailable = rotaAssignments.filter(a => 
                         a.type === "unavailable" && 
                         a.date === isoDate && 
-                        a.location === "Unavailable Pharmacists" &&
                         ((a.startTime <= slot.start && a.endTime > slot.start) || 
                          (a.startTime < slot.end && a.endTime >= slot.end) ||
                          (a.startTime >= slot.start && a.endTime <= slot.end))
@@ -3077,20 +3127,34 @@ const getAssignmentForCell = (
                       return (
                         <td 
                            key={dayOffset + '-' + slotIdx} 
-                           className={`p-1 text-xs bg-red-50 text-red-700 text-center${!effectiveViewOnly && !isDeselected ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselected ? 'bg-gray-200 not-selected-cell' : ''}`}
+                           className={`p-1 text-xs bg-red-50 text-red-700 text-center${!effectiveViewOnly && !isDeselectedDay(date) ? 'cursor-pointer hover:bg-red-100' : ''} ${isDeselectedDay(date) ? 'bg-gray-200 not-selected-cell' : ''}`} 
                            style={{ 
                              borderTop: 'none',
                              borderBottom: 'none', 
+                             lineHeight: '1.2', 
+                             whiteSpace: 'normal', 
+                             wordBreak: 'break-word',
+                             ...(isDeselectedDay(date) ? { position: 'relative' as const, pointerEvents: 'none' as const } : {})
                            }}
                           onClick={(event) => {
-                            if (isDeselected) return;
+                            if (isDeselectedDay(date)) return;
+                            if (effectiveViewOnly) return; // Do not allow editing in view-only mode
+                            // Reverted to createCellTextInput logic for free-text editing
                             const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
-                            const currentText = freeCellText[cellKey] || allUnavailablePharmacists.map((p: any) => p.name || p.displayName || 'Unknown').join(', ');
+                            // Find all unavailable pharmacists for this cell to prepopulate text if cell is empty
+                            const unavailableHere = rotaAssignments.filter(a => 
+                              a.type === "unavailable" && 
+                              a.date === isoDate && 
+                              a.startTime === slot.start && 
+                              a.endTime === slot.end
+                            ).map(a => a.pharmacistDetails?.name || 'Unavailable');
+                            
+                            const currentText = freeCellText[cellKey] || unavailableHere.join(', ');
                             createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#fee2e2'); // Light red background
-                          }}
+                           }}
                         >
                           {(() => {
-                            if (isDeselected) {
+                            if (isDeselectedDay(date)) {
                               return (
                                 <div className="flex items-center justify-center h-full w-full">
                                   <span className="text-gray-500 font-medium text-xs">Not Selected</span>
@@ -3186,6 +3250,7 @@ const getAssignmentForCell = (
               </style>
             </table>
           </div>
+          )}
         </div>
       )}
       {/* Add the PharmacistSelectionModal - only shown when not in view-only mode */}
