@@ -4067,41 +4067,45 @@ export const saveFreeCellText = mutation({
     return { success: true };
   }
 });
-// New mutation to update only the pharmacist for a specific assignment ID
+// New mutation to update only the pharmacist for a specific assignment identified by its index within a rota
+// New mutation to update only the pharmacist for a specific assignment index within a rota
 export const updatePharmacistForAssignment = mutation({
   args: {
-    assignmentId: v.id("rotaAssignments"),
+    assignmentIndex: v.number(), // Index of the assignment within the rota's assignments array
     newPharmacistId: v.id("pharmacists"),
-    rotaId: v.id("rotas"), // Include rotaId to potentially update the parent rota's lastEdited or similar
+    rotaId: v.id("rotas"),
   },
   handler: async (ctx, args) => {
-    const { assignmentId, newPharmacistId, rotaId } = args;
+    const { assignmentIndex, newPharmacistId, rotaId } = args;
 
-    // Fetch the assignment to ensure it exists
-    const assignment = await ctx.db.get(assignmentId);
-    if (!assignment) {
-      throw new Error(`Assignment with ID ${assignmentId} not found.`);
-    }
-
-    // Check if the rota exists and if the assignment belongs to it (optional, but good practice)
+    // Check if the rota exists
     const rota = await ctx.db.get(rotaId);
     if (!rota) {
       throw new Error(`Rota with ID ${rotaId} not found.`);
     }
-    // This check assumes rotaAssignments are stored directly or referenced in a way
-    // that can be validated. If assignments are sub-documents, this check needs adjustment.
-    // For now, we'll trust the rotaId passed from the client is correct.
 
-    // Update the pharmacistId for the specific assignment
-    await ctx.db.patch(assignmentId, { pharmacistId: newPharmacistId });
+    // Check if the assignment index is valid
+    if (!rota.assignments || assignmentIndex < 0 || assignmentIndex >= rota.assignments.length) {
+      throw new Error(`Invalid assignment index ${assignmentIndex} for rota ${rotaId}.`);
+    }
 
-    // Optionally, update the parent rota document (e.g., lastEdited timestamp)
-    // This depends on your application's needs.
-    await ctx.db.patch(rotaId, { lastEdited: new Date().toISOString() });
+    // Update the pharmacistId for the specific assignment in the array
+    // We need to create a new array with the updated assignment
+    const updatedAssignments = [...rota.assignments];
+    updatedAssignments[assignmentIndex] = {
+      ...updatedAssignments[assignmentIndex],
+      pharmacistId: newPharmacistId
+    };
+
+    // Update the rota document with the new assignments array and lastEdited timestamp
+    await ctx.db.patch(rotaId, { 
+      assignments: updatedAssignments,
+      lastEdited: new Date().toISOString() 
+    });
     
-    console.log(`[updatePharmacistForAssignment] Updated assignment ${assignmentId} to pharmacist ${newPharmacistId} in rota ${rotaId}`);
+    console.log(`[updatePharmacistForAssignment] Updated assignment at index ${assignmentIndex} to pharmacist ${newPharmacistId} in rota ${rotaId}`);
 
-    return { success: true, updatedAssignmentId: assignmentId };
+    return { success: true, rotaId, updatedAssignmentIndex: assignmentIndex };
   },
 });
 export const updateRotaAssignment = mutation({

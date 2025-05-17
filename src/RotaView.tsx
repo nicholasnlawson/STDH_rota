@@ -3,6 +3,14 @@ import { useQuery, useMutation, useConvex } from "convex/react"; // Ensure useCo
 import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
 import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
+
+// Add type declarations for custom properties on the window object
+declare global {
+  interface Window {
+    __rotaViewRendered?: boolean;
+    __sortedSelectedClinicsLogged?: boolean;
+  }
+}
 import { PharmacistSelectionModal } from "./PharmacistSelectionModal";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
@@ -691,7 +699,7 @@ export function RotaView({
     return index;
   };
   
-  // Handle reset - return to original algorithm-generated rota
+  // Handle reset - return to previously published rota if available, or regenerate if not
   const handleReset = async () => {
     console.log('[handleReset] Starting reset process...');
     
@@ -711,7 +719,7 @@ export function RotaView({
       
       console.log('[handleReset] Handling reset for rota with selectedMonday:', selectedMonday);
       
-      // Handle reset differently based on whether we're editing a published rota
+      // First, check if we're editing a published rota (in that case, use the initialRotaAssignments)
       if (publishedRota && !effectiveViewOnly && initialRotaAssignments && initialRotaIdsByDate) {
         // For published rotas in edit mode, simply restore to the initial data without regenerating
         console.log('[handleReset] Editing published rota - restoring original assignments');
@@ -736,17 +744,74 @@ export function RotaView({
         
         console.log('[handleReset] Reset to initial published rota assignments complete');
       } else {
-        // For normal rotas (not editing published), regenerate completely
-        console.log('[handleReset] Standard reset - regenerating rota');
+        // Check if there are published rotas for this week we can restore to
+        // Look for published rotas in allRotas that match the selected week
+        const publishedRotasForWeek = allRotas.filter((r: any) => {
+          // Check if this rota is for the current week and is published
+          const rotaDate = new Date(r.date);
+          const rotaDateStr = rotaDate.toISOString().split('T')[0];
+          const selectedDate = new Date(selectedMonday);
+          const daysDiff = Math.floor((rotaDate.getTime() - selectedDate.getTime()) / (1000 * 60 * 60 * 24));
+          return r.status === 'published' && daysDiff >= 0 && daysDiff < 7; // Within the selected week
+        });
         
-        // Clear modifications
-        setEauAdditionalRows([]);
-        setIgnoredUnavailableRules({});
-        setRotaUnavailableRules({});
-        setFreeCellText({});
-        
-        // Call the API to regenerate the rota completely
-        await handleGenerateWeeklyRota(undefined, true);
+        if (publishedRotasForWeek.length > 0) {
+          // If we have published rotas for this week, restore those instead of regenerating
+          console.log('[handleReset] Found published rotas for this week, restoring those instead of regenerating');
+          
+          // Clear modifications
+          setEauAdditionalRows([]);
+          setIgnoredUnavailableRules({});
+          setRotaUnavailableRules({});
+          setFreeCellText({});
+          
+          // Create a map of date to rota ID and collect all assignments
+          const newRotaIdsByDate: Record<string, Id<"rotas">> = {};
+          const allAssignments: any[] = [];
+          const allFreeCellText: Record<string, string> = {};
+          
+          publishedRotasForWeek.forEach((rota: any) => {
+            // Add date to rota ID mapping
+            const dateObj = new Date(rota.date);
+            const dateStr = dateObj.toISOString().split('T')[0];
+            newRotaIdsByDate[dateStr] = rota._id;
+            
+            // Add assignments with date field
+            if (Array.isArray(rota.assignments)) {
+              const assignmentsWithDate = rota.assignments.map((a: any) => ({
+                ...a,
+                date: dateStr
+              }));
+              allAssignments.push(...assignmentsWithDate);
+            }
+            
+            // Collect free cell text
+            if (rota.freeCellText && typeof rota.freeCellText === 'object') {
+              Object.entries(rota.freeCellText).forEach(([key, value]) => {
+                allFreeCellText[key] = value as string;
+              });
+            }
+          });
+          
+          // Update state with the published rota data
+          setRotaIdsByDate(newRotaIdsByDate);
+          setRotaAssignments(allAssignments);
+          setFreeCellText(allFreeCellText);
+          
+          console.log('[handleReset] Reset to published rota assignments complete');
+        } else {
+          // If no published rotas, fall back to regenerating completely
+          console.log('[handleReset] No published rotas found for this week - regenerating rota');
+          
+          // Clear modifications
+          setEauAdditionalRows([]);
+          setIgnoredUnavailableRules({});
+          setRotaUnavailableRules({});
+          setFreeCellText({});
+          
+          // Call the API to regenerate the rota completely
+          await handleGenerateWeeklyRota(undefined, true);
+        }
       }
       
       setTimeout(() => {
@@ -766,7 +831,10 @@ export function RotaView({
 
   // useEffect to populate rotaAssignments from allRotas for display or from initialRotaAssignments for editing
   useEffect(() => {
-    console.log('[useEffect][populate rotaAssignments] Dependencies changed. Finding new assignments...');
+    // Only log when genuinely needed
+    const isInitialOrChange = rotaAssignments.length === 0 || initialRotaAssignments.length !== rotaAssignments.length;
+    if (isInitialOrChange) {
+      console.log('[useEffect][populate rotaAssignments] Dependencies changed. Finding new assignments...');
     
     // Handle special case: when we're showing published rotas in edit mode,
     // we should maintain the initialRotaAssignments and not recompute from allRotas
@@ -854,10 +922,18 @@ export function RotaView({
       setFreeCellText(allFreeCellText); // Use the free cell text from rotas
       console.log(`[populate rotaAssignments] Total assignments loaded: ${allAssignments.length}`);
     }
+    }
   // We're explicitly NOT including rotaIdsByDate and rotaAssignments in the dependency array
   // to prevent infinite loops, as we update them in the effect
-  // effectiveViewOnly change is handled specially to ensure table never disappears
-  }, [allRotas, initialRotaAssignments, initialRotaIdsByDate, effectiveViewOnly, isViewOnly]);
+  // Using a custom deep comparison function for objects to prevent unnecessary rerenders
+  }, [allRotas, 
+      // Compare initialRotaAssignments by length only to reduce rerenders
+      initialRotaAssignments?.length, 
+      // We don't need to deeply compare these, just check if they exist
+      initialRotaIdsByDate ? Object.keys(initialRotaIdsByDate).length : 0, 
+      effectiveViewOnly, 
+      isViewOnly
+  ]);
 
   // --- LOGGING: Selected Monday and Rendered Dates ---
   useEffect(() => {
@@ -1113,7 +1189,14 @@ export function RotaView({
     }
   }
 
-  console.log('Rendering rotaAssignments', rotaAssignments);
+  // Only log in development and with a condition to reduce noise
+  if (process.env.NODE_ENV === 'development' && rotaAssignments.length > 0 && !window.__rotaViewRendered) {
+    console.log('Rendering rotaAssignments', rotaAssignments.length);
+    // Set a flag to prevent this from logging every render
+    window.__rotaViewRendered = true;
+    // Reset the flag after 2 seconds to allow occasional logging
+    setTimeout(() => { window.__rotaViewRendered = false; }, 2000);
+  }
 
   // Sort clinics by dayOfWeek and startTime for display
   // Function to generate and download a PDF of the rota
@@ -1230,10 +1313,17 @@ export function RotaView({
       ? Array.from(clinicIdsInRota)
       : selectedClinicIds;
     
-    console.log('[sortedSelectedClinics] Clinic IDs in rota:', Array.from(clinicIdsInRota));
-    console.log('[sortedSelectedClinics] Selected clinic IDs from UI:', selectedClinicIds);
-    console.log('[sortedSelectedClinics] Using clinic IDs:', clinicIdsToUse);
-    console.log('[sortedSelectedClinics] View only mode:', effectiveViewOnly);
+    // Only log in development and with a condition to reduce noise
+    if (process.env.NODE_ENV === 'development' && !window.__sortedSelectedClinicsLogged) {
+      console.log('[sortedSelectedClinics] Clinic IDs in rota:', Array.from(clinicIdsInRota));
+      console.log('[sortedSelectedClinics] Selected clinic IDs from UI:', selectedClinicIds);
+      console.log('[sortedSelectedClinics] Using clinic IDs:', clinicIdsToUse);
+      console.log('[sortedSelectedClinics] View only mode:', effectiveViewOnly);
+      // Set a flag to prevent logging every render
+      window.__sortedSelectedClinicsLogged = true;
+      // Reset the flag after 2 seconds
+      setTimeout(() => { window.__sortedSelectedClinicsLogged = false; }, 2000);
+    }
     
     // Filter and sort clinics for display
     return clinics
@@ -1827,6 +1917,8 @@ const getAssignmentForCell = (
       return;
     }
 
+    console.log(`[handleEmptyCellClick] Empty cell clicked: ${location}, ${type}, ${date}, ${start}-${end}`);
+
     setSelectedCell({ 
       rotaId, 
       assignmentIndices: [], 
@@ -1870,8 +1962,8 @@ const getAssignmentForCell = (
       // Regular mode: Find the clicked pharmacist's assignment index
       clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
         a.location === assignment.location && 
-        a.startTime === assignment.startTime && 
-        a.endTime === assignment.endTime &&
+        ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
+         (a.startTime === assignment.startTime && a.endTime === assignment.endTime)) &&
         a.pharmacistId === currentPharmacistId
       );
 
@@ -1880,8 +1972,8 @@ const getAssignmentForCell = (
         const otherAssignments = rota.assignments.filter((a: any, index: number) => 
           index !== clickedAssignmentIndex && // Not the clicked assignment
           a.location === assignment.location && 
-          a.startTime === assignment.startTime && 
-          a.endTime === assignment.endTime
+          ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
+           (a.startTime === assignment.startTime && a.endTime === assignment.endTime))
         );
 
         otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
@@ -1894,8 +1986,9 @@ const getAssignmentForCell = (
       const sameSlotAssignments = rotaAssignments.filter(a => 
         a.date === assignmentDate &&
         a.location === assignment.location && 
-        ((a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
-         (a.start === assignment.start && a.end === assignment.end))
+        ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
+         (a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
+         (a.start === cellStartTime && a.end === cellEndTime))
       );
       
       // Set a dummy index for edit mode
@@ -1909,6 +2002,7 @@ const getAssignmentForCell = (
     
     console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId}`);
     console.log(`[handleCellClick] Other pharmacists in this cell: ${otherPharmacistIds.length > 0 ? otherPharmacistIds.join(', ') : 'none'}`);
+    console.log(`[handleCellClick] Selected time slot: ${cellStartTime}-${cellEndTime}`);
 
     // Store both the selected pharmacist and other pharmacists in the cell
     setSelectedCell({ 
@@ -2056,55 +2150,496 @@ const getAssignmentForCell = (
           return;
         }
         
-        // Get any existing assignments for this slot - same handling for all wards
-        const assignmentsToUpdate = getAssignmentsForScope(
-          selectedCell.location, 
-          selectedCell.date, 
-          "slot",
-          selectedCell.startTime,
-          selectedCell.endTime,
-          selectedCell.currentPharmacistId
-        );
+        // Check if we're editing a specific pharmacist in a multi-pharmacist cell
+        const isReplacingSpecificPharmacist = selectedCell.currentPharmacistId !== null;
         
-        if (assignmentsToUpdate.length > 0 && assignmentsToUpdate[0].indices.length > 0) {
-          // We found an existing assignment for this slot - update it
-          const { rotaId, indices } = assignmentsToUpdate[0];
-          console.log(`[handlePharmacistSelect] Updating existing assignment at index ${indices[0]}`);
+        if (isReplacingSpecificPharmacist) {
+          console.log(`[handlePharmacistSelect] Replacing specific pharmacist ${selectedCell.currentPharmacistId} with ${pharmacistId}`);
+          console.log(`[handlePharmacistSelect] Time slot: ${selectedCell.startTime}-${selectedCell.endTime}`);
           
-          // 1. Update the specific clicked assignment
-          await updateAssignment({
-            rotaId,
-            assignmentIndex: indices[0],
-            pharmacistId,
-            newAssignment: {
-              location: selectedCell.location,
-              type: "ward",
-              startTime: selectedCell.startTime,
-              endTime: selectedCell.endTime
-            }
-          });
+          // Get the assignment for the specific pharmacist we're replacing
+          const rota = allRotas.find((r: any) => r._id === selectedCell.rotaId);
           
-          // 2. If there were other pharmacists in this cell that we need to preserve,
-          // make sure they still have assignments
-          if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
-            console.log(`[handlePharmacistSelect] Preserving ${selectedCell.otherPharmacistIds.length} other pharmacist assignments in this cell`);
+          if (rota && rota.assignments) {
+            // Find the specific assignment index to replace
+            const assignmentIndexToReplace = rota.assignments.findIndex((a: any) => 
+              a.location === selectedCell.location && 
+              a.startTime === selectedCell.startTime && 
+              a.endTime === selectedCell.endTime &&
+              a.pharmacistId === selectedCell.currentPharmacistId
+            );
             
-            // Check if each pharmacist already has an assignment for this slot
-            for (const otherId of selectedCell.otherPharmacistIds) {
-              const hasExistingAssignment = rotaAssignments.some(a => 
-                a.pharmacistId === otherId &&
+            if (assignmentIndexToReplace !== -1) {
+              console.log(`[handlePharmacistSelect] Found assignment to replace at index ${assignmentIndexToReplace}`);
+              
+              // CRITICAL FIX: When updating an existing pharmacist in a multi-pharmacist cell,
+              // we must NOT provide newAssignment parameter to the backend function.
+              // The backend will create a new assignment if newAssignment is provided, 
+              // which would replace all pharmacists with just the new one.
+              await updateAssignment({
+                rotaId: selectedCell.rotaId,
+                assignmentIndex: assignmentIndexToReplace,
+                pharmacistId
+                // Do NOT include newAssignment here! This is what causes the issue.
+              });
+              
+              console.log(`[handlePharmacistSelect] Replaced specific pharmacist successfully (preserving others)`);
+
+              // For time slot specific assignments, make sure to retain other pharmacists who might be in this cell
+              if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
+                console.log(`[handlePharmacistSelect] Slot has ${selectedCell.otherPharmacistIds.length} other pharmacists that are being preserved`);
+                // The other pharmacists' assignments remain untouched since we only updated the specific pharmacist ID
+              }
+            } else {
+              console.log(`[handlePharmacistSelect] Could not find exact assignment in rota, trying rotaAssignments`);
+              console.log(`[handlePharmacistSelect] DEBUG: Looking for pharmacist ${selectedCell.currentPharmacistId} in location ${selectedCell.location} at time ${selectedCell.startTime}-${selectedCell.endTime}`);
+              
+              // Detailed logging of all assignments for this slot to help debug
+              // Search for assignments both with exact time slot and full-day assignments, but we'll handle them differently
+              // Full-day assignments are used for reference to find pharmacists, but we won't update them
+              const allAssignmentsForThisSlot = rotaAssignments.filter(a => 
                 a.location === selectedCell.location &&
                 a.date === selectedCell.date &&
-                a.startTime === selectedCell.startTime &&
+                ((a.startTime === selectedCell.startTime && a.endTime === selectedCell.endTime) || 
+                 (a.startTime === '00:00' && a.endTime === '23:59')) // Include full-day assignments
+              );
+              
+              // Separately track exact time slot assignments vs full-day assignments
+              const exactTimeSlotAssignments = rotaAssignments.filter(a => 
+                a.location === selectedCell.location &&
+                a.date === selectedCell.date &&
+                a.startTime === selectedCell.startTime && 
                 a.endTime === selectedCell.endTime
               );
               
+              const fullDayAssignments = rotaAssignments.filter(a => 
+                a.location === selectedCell.location &&
+                a.date === selectedCell.date &&
+                a.startTime === '00:00' && 
+                a.endTime === '23:59'
+              );
+              
+              console.log(`[handlePharmacistSelect] DEBUG: Found ${allAssignmentsForThisSlot.length} assignments for this slot:`, 
+                allAssignmentsForThisSlot.map(a => ({ 
+                  pharmacistId: a.pharmacistId, 
+                  pharmacistName: getPharmacistName(a.pharmacistId),
+                  startTime: a.startTime, 
+                  endTime: a.endTime 
+                }))
+              );
+              
+              // Try to find the assignment we want to update - the pharmacist we're replacing
+              const assignmentToUpdate = rotaAssignments.find(a => 
+                a.pharmacistId === selectedCell.currentPharmacistId &&
+                a.location === selectedCell.location &&
+                a.date === selectedCell.date &&
+                ((a.startTime === selectedCell.startTime && a.endTime === selectedCell.endTime) ||
+                 (a.startTime === '00:00' && a.endTime === '23:59')) // Handle full-day assignments
+              );
+              
+              if (assignmentToUpdate) {
+                console.log(`[handlePharmacistSelect] DEBUG: Found assignment to update:`, {
+                  pharmacistId: assignmentToUpdate.pharmacistId,
+                  pharmacistName: getPharmacistName(assignmentToUpdate.pharmacistId),
+                  location: assignmentToUpdate.location,
+                  date: assignmentToUpdate.date,
+                  startTime: assignmentToUpdate.startTime,
+                  endTime: assignmentToUpdate.endTime
+                });
+                
+                // We found it in rotaAssignments, but not in the rota itself
+                // CRITICAL FIX: Instead of creating a new assignment, we need to find a way
+                // to update the existing one even though we don't have its index in the rota
+                
+                try {
+                  // APPROACH: Create a completely new set of assignments for this cell
+                  // by replacing only the specific pharmacist we want to update
+                  
+                  // 1. Get the index of the rota for this date
+                  const rotaForDate = allRotas.find(r => r._id === selectedCell.rotaId);
+                  
+                  if (rotaForDate) {
+                    console.log(`[handlePharmacistSelect] DEBUG: Found rota for date ${selectedCell.date}, ID: ${selectedCell.rotaId}`);
+                    
+                    // 2. For reference, get both time-specific and full-day assignments
+                    // But we'll handle them separately to ensure the right behavior
+                    let timeSpecificAssignments = rotaForDate.assignments.filter(a => 
+                      a.location === selectedCell.location && 
+                      a.startTime === selectedCell.startTime && 
+                      a.endTime === selectedCell.endTime
+                    );
+                    
+                    let fullDayAssignments = rotaForDate.assignments.filter(a => 
+                      a.location === selectedCell.location && 
+                      a.startTime === '00:00' && 
+                      a.endTime === '23:59'
+                    );
+                    
+                    console.log(`[handlePharmacistSelect] DEBUG: Found ${timeSpecificAssignments.length} time-specific assignments and ${fullDayAssignments.length} full-day assignments for this cell.`);
+                    
+                    // For multi-pharmacist cells like EAU, we prefer to work with time-specific assignments
+                    let cellAssignments = timeSpecificAssignments.length > 0 ? 
+                      timeSpecificAssignments : fullDayAssignments;
+                    
+                    if (cellAssignments.length > 0) {
+                      // 3. Find the assignment for the pharmacist we want to replace
+                      const assignmentIndexInCell = cellAssignments.findIndex(a => 
+                        a.pharmacistId === selectedCell.currentPharmacistId
+                      );
+                      
+                      if (assignmentIndexInCell !== -1) {
+                        console.log(`[handlePharmacistSelect] DEBUG: Found assignment at index ${assignmentIndexInCell} in the cell assignments array`);
+                        
+                        // 4. Update this specific assignment with the new pharmacist ID
+                        const updatedAssignment = {
+                          ...cellAssignments[assignmentIndexInCell],
+                          pharmacistId: pharmacistId
+                        };
+                        
+                        // 5. Find the actual index in the full rota assignments array
+                        // We need to check if there's a specific time slot assignment first
+                        const exactTimeSlotIndex = rotaForDate.assignments.findIndex(a => 
+                          a.location === selectedCell.location && 
+                          a.startTime === selectedCell.startTime && 
+                          a.endTime === selectedCell.endTime &&
+                          a.pharmacistId === selectedCell.currentPharmacistId
+                        );
+                        
+                        // Then check for a full-day assignment
+                        const fullDayAssignmentIndex = rotaForDate.assignments.findIndex(a => 
+                          a.location === selectedCell.location && 
+                          a.startTime === '00:00' && 
+                          a.endTime === '23:59' &&
+                          a.pharmacistId === selectedCell.currentPharmacistId
+                        );
+                        
+                        console.log(`[handlePharmacistSelect] DEBUG: Found exact time slot index: ${exactTimeSlotIndex}, full day index: ${fullDayAssignmentIndex}`);
+                        
+                        // If we have an exact time slot assignment, update it directly
+                        if (exactTimeSlotIndex !== -1) {
+                          console.log(`[handlePharmacistSelect] DEBUG: Updating existing time-specific assignment`);
+                          
+                          await updateAssignment({
+                            rotaId: selectedCell.rotaId,
+                            assignmentIndex: exactTimeSlotIndex,
+                            pharmacistId
+                            // Don't include newAssignment to preserve structure
+                          });
+                          
+                          console.log(`[handlePharmacistSelect] Updated specific time slot assignment successfully`);
+                        }
+                        // If we only have a full-day assignment, we need to create a comprehensive solution
+                        else if (fullDayAssignmentIndex !== -1 || (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0)) {
+                          console.log(`[handlePharmacistSelect] DEBUG: Complex nested cell case. Creating a complete solution for this time slot`);
+                          
+                          // 1. First, let's get all the pharmacists that should be in this cell AFTER the edit
+                          const pharmacistsAfterEdit = new Set<string>();
+                          
+                          // 2. Add all the current pharmacists except the one being replaced
+                          if (selectedCell.otherPharmacistIds) {
+                            selectedCell.otherPharmacistIds.forEach(id => {
+                              if (id !== selectedCell.currentPharmacistId) { // Don't add the one being replaced
+                                pharmacistsAfterEdit.add(id);
+                              }
+                            });
+                          }
+                          
+                          // 3. Add the new pharmacist
+                          pharmacistsAfterEdit.add(pharmacistId);
+                          
+                          console.log(`[handlePharmacistSelect] DEBUG: Pharmacists in cell after edit:`, 
+                            Array.from(pharmacistsAfterEdit).map(id => getPharmacistName(id)));
+                          
+                          // 4. For each pharmacist, create or update a time-specific assignment
+                          for (const idString of pharmacistsAfterEdit) {
+                            // Need to properly cast the string to a typed Id for the pharmacists table
+                            // This fixes the TypeScript error: Type 'string' is not assignable to type 'Id<"pharmacists">'
+                            const idAsPharmacistId = idString as Id<"pharmacists">;
+                            
+                            // Check if this pharmacist already has a time-specific assignment for this slot
+                            const existingAssignmentIndex = rotaForDate.assignments.findIndex(a => 
+                              a.location === selectedCell.location && 
+                              a.startTime === selectedCell.startTime && 
+                              a.endTime === selectedCell.endTime &&
+                              a.pharmacistId === idAsPharmacistId
+                            );
+                            
+                            if (existingAssignmentIndex !== -1) {
+                              console.log(`[handlePharmacistSelect] DEBUG: Pharmacist ${getPharmacistName(idAsPharmacistId)} already has a time-specific assignment, leaving it unchanged`);
+                              // This pharmacist already has a time-specific assignment, leave it as is
+                            } else {
+                              // Create a new time-specific assignment for this pharmacist
+                              console.log(`[handlePharmacistSelect] DEBUG: Creating new time-specific assignment for ${getPharmacistName(idAsPharmacistId)}`);
+                              
+                              await updateAssignment({
+                                rotaId: selectedCell.rotaId,
+                                assignmentIndex: -1, // Create new
+                                pharmacistId: idAsPharmacistId,
+                                newAssignment: {
+                                  location: selectedCell.location,
+                                  type: "ward",
+                                  startTime: selectedCell.startTime,
+                                  endTime: selectedCell.endTime
+                                }
+                              });
+                            }
+                          }
+                          
+                          console.log(`[handlePharmacistSelect] Created/updated time-specific assignments for all ${pharmacistsAfterEdit.size} pharmacists in this cell`);
+                        } else {
+                          console.log(`[handlePharmacistSelect] DEBUG: Could not find assignment in the full rota, using alternative approach`);
+                          
+                          // Alternative approach: check if new pharmacist already has an assignment
+                          const existingNewPharmacistAssignment = allAssignmentsForThisSlot.find(a => 
+                            a.pharmacistId === pharmacistId
+                          );
+                          
+                          if (!existingNewPharmacistAssignment) {
+                            // Create assignment for new pharmacist
+                            await updateAssignment({
+                              rotaId: selectedCell.rotaId,
+                              assignmentIndex: -1, // Create new
+                              pharmacistId,
+                              newAssignment: {
+                                location: selectedCell.location,
+                                type: "ward",
+                                startTime: selectedCell.startTime,
+                                endTime: selectedCell.endTime
+                              }
+                            });
+                            
+                            console.log(`[handlePharmacistSelect] Created new assignment for ${pharmacistId}, now need to remove old one`);
+                            
+                            // In this case, we need to manually find and remove the old pharmacist's assignment
+                            // This will be handled by the state update at the end of the function
+                          } else {
+                            console.log(`[handlePharmacistSelect] Pharmacist ${pharmacistId} already has assignment in this slot`);
+                          }
+                        }
+                      } else {
+                        console.log(`[handlePharmacistSelect] DEBUG: Could not find the pharmacist ${selectedCell.currentPharmacistId} in the cell assignments`);
+                        
+                        // Just add the new pharmacist to the cell
+                        await updateAssignment({
+                          rotaId: selectedCell.rotaId,
+                          assignmentIndex: -1, // Create new
+                          pharmacistId,
+                          newAssignment: {
+                            location: selectedCell.location,
+                            type: "ward",
+                            startTime: selectedCell.startTime,
+                            endTime: selectedCell.endTime
+                          }
+                        });
+                        
+                        console.log(`[handlePharmacistSelect] Added pharmacist to cell as could not find existing one to replace`);
+                      }
+                    } else {
+                      console.log(`[handlePharmacistSelect] DEBUG: No assignments found in rota, creating new one`);
+                      
+                      // No assignments found in the rota, create a new one
+                      await updateAssignment({
+                        rotaId: selectedCell.rotaId,
+                        assignmentIndex: -1, // Create new
+                        pharmacistId,
+                        newAssignment: {
+                          location: selectedCell.location,
+                          type: "ward",
+                          startTime: selectedCell.startTime,
+                          endTime: selectedCell.endTime
+                        }
+                      });
+                      
+                      console.log(`[handlePharmacistSelect] Created new assignment for empty cell`);
+                    }
+                  } else {
+                    console.error(`[handlePharmacistSelect] DEBUG: Could not find rota for date ${selectedCell.date}`);
+                    
+                    // Fallback: just create a new assignment
+                    await updateAssignment({
+                      rotaId: selectedCell.rotaId,
+                      assignmentIndex: -1, // Create new
+                      pharmacistId,
+                      newAssignment: {
+                        location: selectedCell.location,
+                        type: "ward",
+                        startTime: selectedCell.startTime,
+                        endTime: selectedCell.endTime
+                      }
+                    });
+                    
+                    console.log(`[handlePharmacistSelect] Created new assignment as fallback`);
+                  }
+                } catch (error) {
+                  console.error(`[handlePharmacistSelect] DEBUG: Error during complex replacement:`, error);
+                  
+                  // Final fallback if all else fails: create a new assignment
+                  await updateAssignment({
+                    rotaId: selectedCell.rotaId,
+                    assignmentIndex: -1, // Create new
+                    pharmacistId,
+                    newAssignment: {
+                      location: selectedCell.location,
+                      type: "ward",
+                      startTime: selectedCell.startTime,
+                      endTime: selectedCell.endTime
+                    }
+                  });
+                  
+                  console.log(`[handlePharmacistSelect] Created new assignment as error fallback`);
+                }
+              } else {
+                console.error(`[handlePharmacistSelect] DEBUG: Could not find assignment to replace in rotaAssignments either`);
+                
+                // Fall back to creating a new assignment for this specific time slot
+                // But first check if there's already an assignment for this pharmacist and slot
+                const existingAssignment = rotaAssignments.find(a => 
+                  a.pharmacistId === pharmacistId &&
+                  a.location === selectedCell.location &&
+                  a.date === selectedCell.date &&
+                  a.startTime === selectedCell.startTime &&
+                  a.endTime === selectedCell.endTime
+                );
+                
+                if (!existingAssignment) {
+                  await updateAssignment({
+                    rotaId: selectedCell.rotaId,
+                    assignmentIndex: -1, // Create new
+                    pharmacistId,
+                    newAssignment: {
+                      location: selectedCell.location,
+                      type: "ward",
+                      startTime: selectedCell.startTime,
+                      endTime: selectedCell.endTime
+                    }
+                  });
+                  
+                  console.log(`[handlePharmacistSelect] Created new time-specific assignment as fallback`);
+                } else {
+                  console.log(`[handlePharmacistSelect] Pharmacist already has an assignment for this slot, no need to create a new one`);
+                }
+              }
+            }
+          } else {
+            console.log(`[handlePharmacistSelect] Rota not found in allRotas, trying rotaAssignments`);
+            
+            // If we can't find the rota, we're in edit mode or something changed in the backend
+            // Check if the new pharmacist already has an assignment for this slot
+            const existingNewPharmacistAssignment = rotaAssignments.find(a => 
+              a.pharmacistId === pharmacistId &&
+              a.location === selectedCell.location &&
+              a.date === selectedCell.date &&
+              a.startTime === selectedCell.startTime &&
+              a.endTime === selectedCell.endTime
+            );
+            
+            if (!existingNewPharmacistAssignment) {
               // Only create a new assignment if one doesn't already exist
-              if (!hasExistingAssignment) {
-                console.log(`[handlePharmacistSelect] Creating missing assignment for ${getPharmacistName(otherId)}`);
+              await updateAssignment({
+                rotaId: selectedCell.rotaId,
+                assignmentIndex: -1, // Create new
+                pharmacistId,
+                newAssignment: {
+                  location: selectedCell.location,
+                  type: "ward",
+                  startTime: selectedCell.startTime,
+                  endTime: selectedCell.endTime
+                }
+              });
+              
+              console.log(`[handlePharmacistSelect] Created new assignment since we couldn't update directly`);
+            } else {
+              console.log(`[handlePharmacistSelect] Pharmacist already has an assignment for this slot, no need to create a new one`);
+            }
+          }
+        } else {
+          // Get any existing assignments for this slot - same handling for all wards
+          const assignmentsToUpdate = getAssignmentsForScope(
+            selectedCell.location, 
+            selectedCell.date, 
+            "slot",
+            selectedCell.startTime,
+            selectedCell.endTime,
+            selectedCell.currentPharmacistId
+          );
+          
+          if (assignmentsToUpdate.length > 0 && assignmentsToUpdate[0].indices.length > 0) {
+            // We found an existing assignment for this slot - update it
+            const { rotaId, indices } = assignmentsToUpdate[0];
+            console.log(`[handlePharmacistSelect] Updating existing assignment at index ${indices[0]}`);
+            
+            // 1. Update the specific clicked assignment
+            await updateAssignment({
+              rotaId,
+              assignmentIndex: indices[0],
+              pharmacistId,
+              newAssignment: {
+                location: selectedCell.location,
+                type: "ward",
+                startTime: selectedCell.startTime,
+                endTime: selectedCell.endTime
+              }
+            });
+            
+            // 2. If there were other pharmacists in this cell that we need to preserve,
+            // make sure they still have assignments
+            if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
+              console.log(`[handlePharmacistSelect] Preserving ${selectedCell.otherPharmacistIds.length} other pharmacist assignments in this cell`);
+              
+              // Check if each pharmacist already has an assignment for this slot
+              for (const otherId of selectedCell.otherPharmacistIds) {
+                const hasExistingAssignment = rotaAssignments.some(a => 
+                  a.pharmacistId === otherId &&
+                  a.location === selectedCell.location &&
+                  a.date === selectedCell.date &&
+                  a.startTime === selectedCell.startTime &&
+                  a.endTime === selectedCell.endTime
+                );
+                
+                // Only create a new assignment if one doesn't already exist
+                if (!hasExistingAssignment) {
+                  console.log(`[handlePharmacistSelect] Creating missing assignment for ${getPharmacistName(otherId)}`);
+                  
+                  await updateAssignment({
+                    rotaId,
+                    assignmentIndex: -1, // Create new
+                    pharmacistId: otherId,
+                    newAssignment: {
+                      location: selectedCell.location,
+                      type: "ward",
+                      startTime: selectedCell.startTime,
+                      endTime: selectedCell.endTime
+                    }
+                  });
+                }
+              }
+            }
+          } else {
+            // No existing assignment found - create a new one
+            console.log("[handlePharmacistSelect] No existing assignment found. Creating new one.");
+            
+            // 1. Create assignment for the selected pharmacist
+            await updateAssignment({
+              rotaId: selectedCell.rotaId,
+              assignmentIndex: -1, // Create new
+              pharmacistId,
+              newAssignment: {
+                location: selectedCell.location,
+                type: "ward",
+                startTime: selectedCell.startTime,
+                endTime: selectedCell.endTime
+              }
+            });
+            
+            // 2. Ensure all other pharmacists have assignments in this cell
+            if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
+              console.log(`[handlePharmacistSelect] Preserving ${selectedCell.otherPharmacistIds.length} other pharmacist assignments in this cell`);
+              
+              for (const otherId of selectedCell.otherPharmacistIds) {
+                console.log(`[handlePharmacistSelect] Creating assignment for ${getPharmacistName(otherId)}`);
                 
                 await updateAssignment({
-                  rotaId,
+                  rotaId: selectedCell.rotaId,
                   assignmentIndex: -1, // Create new
                   pharmacistId: otherId,
                   newAssignment: {
@@ -2117,73 +2652,73 @@ const getAssignmentForCell = (
               }
             }
           }
-        } else {
-          // No existing assignment found - create a new one
-          console.log("[handlePharmacistSelect] No existing assignment found. Creating new one.");
-          
-          // 1. Create assignment for the selected pharmacist
-          await updateAssignment({
-            rotaId: selectedCell.rotaId,
-            assignmentIndex: -1, // Create new
-            pharmacistId,
-            newAssignment: {
-              location: selectedCell.location,
-              type: "ward",
-              startTime: selectedCell.startTime,
-              endTime: selectedCell.endTime
-            }
-          });
-          
-          // 2. Ensure all other pharmacists have assignments in this cell
-          if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
-            console.log(`[handlePharmacistSelect] Preserving ${selectedCell.otherPharmacistIds.length} other pharmacist assignments in this cell`);
-            
-            for (const otherId of selectedCell.otherPharmacistIds) {
-              console.log(`[handlePharmacistSelect] Creating assignment for ${getPharmacistName(otherId)}`);
-              
-              await updateAssignment({
-                rotaId: selectedCell.rotaId,
-                assignmentIndex: -1, // Create new
-                pharmacistId: otherId,
-                newAssignment: {
-                  location: selectedCell.location,
-                  type: "ward",
-                  startTime: selectedCell.startTime,
-                  endTime: selectedCell.endTime
-                }
-              });
-            }
-          }
         }
       } else {
         // For day or week scope
         console.log(`[handlePharmacistSelect] Handling ${scope} scope for ward`);
         
-        const assignmentsToUpdate = getAssignmentsForScope(
-          selectedCell.location, 
-          selectedCell.date, 
-          scope,
-          selectedCell.startTime,
-          selectedCell.endTime,
-          selectedCell.currentPharmacistId
-        );
+        // Check if we're editing a specific pharmacist in a multi-pharmacist cell
+        const isReplacingSpecificPharmacist = selectedCell.currentPharmacistId !== null;
         
-        console.log(`[handlePharmacistSelect] Found ${assignmentsToUpdate.length} assignments to update`);
-        
-        if (assignmentsToUpdate.length === 0) {
-          console.warn("[handlePharmacistSelect] No assignments found to update for the selected scope and details.");
-          return;
-        }
-        
-        // Update each assignment
-        for (const { rotaId, indices } of assignmentsToUpdate) {
-          console.log(`[handlePharmacistSelect] Updating ${indices.length} assignments for rota ${rotaId}`);
-          for (const idx of indices) {
-            await updateAssignment({
-              rotaId,
-              assignmentIndex: idx,
-              pharmacistId
-            });
+        if (isReplacingSpecificPharmacist) {
+          console.log(`[handlePharmacistSelect] Day/Week scope: Replacing specific pharmacist ${selectedCell.currentPharmacistId} with ${pharmacistId}`);
+          
+          // Get all assignments for this pharmacist in the selected location for the relevant date(s)
+          const assignmentsToUpdate = getAssignmentsForScope(
+            selectedCell.location, 
+            selectedCell.date, 
+            scope,
+            selectedCell.startTime,
+            selectedCell.endTime,
+            selectedCell.currentPharmacistId // Search only for the specific pharmacist's assignments
+          );
+          
+          console.log(`[handlePharmacistSelect] Found ${assignmentsToUpdate.length} specific pharmacist assignments to update`);
+          
+          if (assignmentsToUpdate.length === 0) {
+            console.warn("[handlePharmacistSelect] No assignments found to update for the selected pharmacist.");
+            return;
+          }
+          
+          // Update only the assignments for the specific pharmacist
+          for (const { rotaId, indices } of assignmentsToUpdate) {
+            console.log(`[handlePharmacistSelect] Updating ${indices.length} assignments for specific pharmacist in rota ${rotaId}`);
+            for (const idx of indices) {
+              await updateAssignment({
+                rotaId,
+                assignmentIndex: idx,
+                pharmacistId
+              });
+            }
+          }
+        } else {
+          // Normal behavior for non-specific pharmacist selection
+          const assignmentsToUpdate = getAssignmentsForScope(
+            selectedCell.location, 
+            selectedCell.date, 
+            scope,
+            selectedCell.startTime,
+            selectedCell.endTime,
+            selectedCell.currentPharmacistId
+          );
+          
+          console.log(`[handlePharmacistSelect] Found ${assignmentsToUpdate.length} assignments to update`);
+          
+          if (assignmentsToUpdate.length === 0) {
+            console.warn("[handlePharmacistSelect] No assignments found to update for the selected scope and details.");
+            return;
+          }
+          
+          // Update each assignment
+          for (const { rotaId, indices } of assignmentsToUpdate) {
+            console.log(`[handlePharmacistSelect] Updating ${indices.length} assignments for rota ${rotaId}`);
+            for (const idx of indices) {
+              await updateAssignment({
+                rotaId,
+                assignmentIndex: idx,
+                pharmacistId
+              });
+            }
           }
         }
       }
@@ -2193,13 +2728,21 @@ const getAssignmentForCell = (
     // Refresh the local state to show the updated assignments
     console.log("[handlePharmacistSelect] Refreshing local rotaAssignments state.");
     
-    // Refresh the local state with the latest data from allRotas
-    // This is more reliable than trying to manually track which assignments were updated
-    const refreshedAssignments = allRotas.flatMap((r: any) => 
-      r.assignments.map((a: any) => ({ ...a, date: r.date }))
-    );
-    setRotaAssignments(refreshedAssignments);
-    console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
+    // Get fresh assignments directly from the server to ensure we have the most accurate state
+    // This ensures we preserve all multi-pharmacist cells exactly as they are in the database
+    const refreshedAssignments = allRotas.flatMap((r: any) => { 
+      // Map each assignment to include its date
+      const assignmentsWithDate = r.assignments.map((a: any) => ({ ...a, date: r.date }));
+      return assignmentsWithDate;
+    });
+    
+    // If we have any assignments, update our state
+    if (refreshedAssignments.length > 0) {
+      setRotaAssignments(refreshedAssignments);
+      console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
+    } else {
+      console.warn("[handlePharmacistSelect] No assignments found during refresh, keeping existing state.");
+    }
     
     // If in edit mode of published rota and we have a callback, notify parent about changes
     if (!isViewOnly && onEditsChanged) {
@@ -2227,49 +2770,55 @@ const getAssignmentForCell = (
   return (
     <div className="mt-4 w-full" style={{ padding: 0, margin: 0, boxSizing: 'border-box' }}>
       <div className="flex gap-4 mt-6 mx-4">
-        <div>
-          <label className="block font-medium mb-1">Select Monday (week start)</label>
-          <input
-            type="date"
-            className="border rounded px-2 py-1"
-            value={selectedMonday}
-            onChange={e => setSelectedMonday(e.target.value)}
-            min="2024-01-01"
-            step="7"
-          />
-        </div>
-        <button
-          className="bg-blue-600 text-white px-3 py-2 rounded mt-6 disabled:opacity-50"
-          disabled={!selectedMonday || generatingWeekly}
-          onClick={() => {
-            // Keep track of current configuration
-            if (selectedMonday) {
-              // Save current configuration when starting rota creation
-              try {
-                const userName = currentUser?.name || currentUser?.email || 'Unknown User';
-                saveRotaConfiguration({
-                  weekStartDate: selectedMonday,
-                  selectedClinicIds,
-                  selectedPharmacistIds,
-                  selectedWeekdays,
-                  pharmacistWorkingDays, 
-                  singlePharmacistDispensaryDays,
-                  ignoredUnavailableRules,
-                  rotaUnavailableRules,
-                  userName,
-                  isGenerated: false // Not generated yet
-                });
-              } catch (error) {
-                console.error('Error saving configuration:', error);
-              }
-            }
+        {/* Only show date selector and Create Rota button in non-view-only mode */}
+        {!effectiveViewOnly ? (
+          <>
+            <div>
+              <label className="block font-medium mb-1">Select Monday (week start)</label>
+              <input
+                type="date"
+                className="border rounded px-2 py-1"
+                value={selectedMonday}
+                onChange={e => setSelectedMonday(e.target.value)}
+                min="2024-01-01"
+                step="7"
+              />
+            </div>
             
-            setShowClinicSelection(true);
-            setRotaGenerated(false);
-          }}
-        >
-          {hasExistingConfig ? 'Update Rota Details' : 'Create Rota'}
-        </button>
+            <button
+              className="bg-blue-600 text-white px-3 py-2 rounded mt-6 disabled:opacity-50"
+              disabled={!selectedMonday || generatingWeekly}
+              onClick={() => {
+                // Keep track of current configuration
+                if (selectedMonday) {
+                  // Save current configuration when starting rota creation
+                  try {
+                    const userName = currentUser?.name || currentUser?.email || 'Unknown User';
+                    saveRotaConfiguration({
+                      weekStartDate: selectedMonday,
+                      selectedClinicIds,
+                      selectedPharmacistIds,
+                      selectedWeekdays,
+                      pharmacistWorkingDays, 
+                      singlePharmacistDispensaryDays,
+                      ignoredUnavailableRules,
+                      rotaUnavailableRules,
+                      userName,
+                      isGenerated: false // Not generated yet
+                    });
+                  } catch (error) {
+                    console.error('Error saving configuration:', error);
+                  }
+                }
+                
+                setShowClinicSelection(true);
+                setRotaGenerated(false);
+              }}
+            >
+              {hasExistingConfig ? 'Update Rota Details' : 'Create Rota'}
+            </button>
+          </>
+        ) : null}
       </div>
       {showClinicSelection && !rotaGenerated && (
         <div className="mb-4">

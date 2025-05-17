@@ -93,6 +93,7 @@ const applicationTables = {
     publishTime: v.optional(v.string()), // Formatted time
     publishedSetId: v.optional(v.string()), // ID to group published rotas by set
     originalRotaId: v.optional(v.id("rotas")), // Reference to the original rota
+    lastEdited: v.optional(v.string()), // Timestamp of the last edit
     conflicts: v.optional(v.array(
       v.object({
         type: v.string(),
