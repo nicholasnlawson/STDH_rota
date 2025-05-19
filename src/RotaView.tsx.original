@@ -122,8 +122,6 @@ export function RotaView({
   const [freeCellText, setFreeCellText] = useState<Record<string, string>>({});
   const [pharmacistWorkingDays, setPharmacistWorkingDays] = useState<Record<string, string[]>>({});
   const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
-  const [selectedPharmacistForReport, setSelectedPharmacistForReport] = useState<Id<"pharmacists"> | null>(null);
-  const [showPharmacistReport, setShowPharmacistReport] = useState(false);
   const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"rotas">>>(initialRotaIdsByDate || {});
   const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
   
@@ -821,6 +819,23 @@ export function RotaView({
               // Assign the first eligible pharmacist
               lunchCoverAssignment.pharmacistId = sortedPharmacists[0]._id;
             }
+            
+            // Important: Update the local state for dispensary assignments
+            // This is especially important for lunch cover cells
+            setRotaAssignments(prev => {
+              return prev.map(a => {
+                if (a.date === date && 
+                    a.type === 'dispensary' && 
+                    a.isLunchCover === true && 
+                    a.pharmacistId === lunchCoverAssignment.pharmacistId) {
+                  return {
+                    ...a,
+                    pharmacistId: eligiblePharmacists[0]._id
+                  };
+                }
+                return a;
+              });
+            });
           }
         } else {
           // No dispensary pharmacist - handle full day assignments
@@ -871,21 +886,7 @@ export function RotaView({
             });
             
             // Assign pharmacists to this time slot
-            assignments.forEach((assignment, idx) => {
-              const pharmacist = sortedPharmacists[idx % sortedPharmacists.length];
-              if (pharmacist) {
-                assignment.pharmacistId = pharmacist._id;
-                // Update assignment count
-                const currentCount = pharmacistAssignmentCounts.get(pharmacist._id) || 0;
-                pharmacistAssignmentCounts.set(pharmacist._id, currentCount + 1);
-              }
-            });
-          }
         }
-        
-        // Update the date's assignments
-        const updatedDateAssignments = [...otherAssignments, ...dispensaryAssignments];
-        
         // Update the main assignments array
         const assignmentIndices = currentAssignments
           .map((a, i) => (a.date === date ? i : -1))
@@ -2166,9 +2167,6 @@ const getAssignmentForCell = (
       return;
     }
 
-    // Check if this is a lunch cover assignment
-    const isLunchCover = assignment.isLunchCover === true;
-    
     // In edit mode, we might not have the rota in allRotas, so we'll work with rotaAssignments directly
     let clickedAssignmentIndex = -1;
     let otherPharmacistIds: Id<"pharmacists">[] = [];
@@ -2177,78 +2175,48 @@ const getAssignmentForCell = (
     const rota = allRotas.find((r: any) => r._id === rotaId);
     
     if (rota && rota.assignments) {
-      // For lunch cover, we need to be more specific in our search
-      if (isLunchCover) {
-        clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
-          a.location === assignment.location && 
-          a.isLunchCover === true &&
-          a.pharmacistId === currentPharmacistId
-        );
-        
-        // For lunch cover, we don't want any "other pharmacists" - only one can be assigned
-        otherPharmacistIds = [];
-      } else {
-        // Regular mode: Find the clicked pharmacist's assignment index
-        clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
+      // Regular mode: Find the clicked pharmacist's assignment index
+      clickedAssignmentIndex = rota.assignments.findIndex((a: any) => 
+        a.location === assignment.location && 
+        ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
+         (a.startTime === assignment.startTime && a.endTime === assignment.endTime)) &&
+        a.pharmacistId === currentPharmacistId
+      );
+
+      // Find all other pharmacists assigned to the same cell (same location, time, date)
+      if (clickedAssignmentIndex !== -1) {
+        const otherAssignments = rota.assignments.filter((a: any, index: number) => 
+          index !== clickedAssignmentIndex && // Not the clicked assignment
           a.location === assignment.location && 
           ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
-           (a.startTime === assignment.startTime && a.endTime === assignment.endTime)) &&
-          a.pharmacistId === currentPharmacistId
+           (a.startTime === assignment.startTime && a.endTime === assignment.endTime))
         );
 
-        // Find all other pharmacists assigned to the same cell (same location, time, date)
-        if (clickedAssignmentIndex !== -1) {
-          const otherAssignments = rota.assignments.filter((a: any, index: number) => 
-            index !== clickedAssignmentIndex && // Not the clicked assignment
-            a.location === assignment.location && 
-            ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
-             (a.startTime === assignment.startTime && a.endTime === assignment.endTime))
-          );
-
-          otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
-        }
+        otherPharmacistIds = otherAssignments.map((a: any) => a.pharmacistId);
       }
     } 
   
     // If we couldn't find in allRotas or clickedAssignmentIndex is -1, try rotaAssignments (edit mode)
     if (clickedAssignmentIndex === -1) {
-      if (isLunchCover) {
-        // For lunch cover, find exact lunch cover assignment
-        const lunchCoverAssignment = rotaAssignments.find(a => 
-          a.date === assignmentDate &&
-          a.location === assignment.location && 
-          a.isLunchCover === true
-        );
-        
-        if (lunchCoverAssignment) {
-          // Set a dummy index for the assignment
-          clickedAssignmentIndex = 0;
-          
-          // No other pharmacists for lunch cover
-          otherPharmacistIds = [];
-        }
-      } else {
-        // Find other pharmacists assigned to the same cell from rotaAssignments
-        const sameSlotAssignments = rotaAssignments.filter(a => 
-          a.date === assignmentDate &&
-          a.location === assignment.location && 
-          ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
-           (a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
-           (a.start === cellStartTime && a.end === cellEndTime))
-        );
-        
-        // Set a dummy index for edit mode
-        clickedAssignmentIndex = 0;
-        
-        // Get other pharmacist IDs excluding the current one
-        otherPharmacistIds = sameSlotAssignments
-          .filter(a => a.pharmacistId !== currentPharmacistId)
-          .map(a => a.pharmacistId);
-      }
+      // Find other pharmacists assigned to the same cell from rotaAssignments
+      const sameSlotAssignments = rotaAssignments.filter(a => 
+        a.date === assignmentDate &&
+        a.location === assignment.location && 
+        ((a.startTime === cellStartTime && a.endTime === cellEndTime) ||
+         (a.startTime === assignment.startTime && a.endTime === assignment.endTime) ||
+         (a.start === cellStartTime && a.end === cellEndTime))
+      );
+      
+      // Set a dummy index for edit mode
+      clickedAssignmentIndex = 0;
+      
+      // Get other pharmacist IDs excluding the current one
+      otherPharmacistIds = sameSlotAssignments
+        .filter(a => a.pharmacistId !== currentPharmacistId)
+        .map(a => a.pharmacistId);
     }
     
     console.log(`[handleCellClick] Selected pharmacist ${currentPharmacistId}`);
-    console.log(`[handleCellClick] Is lunch cover: ${isLunchCover}`);
     console.log(`[handleCellClick] Other pharmacists in this cell: ${otherPharmacistIds.length > 0 ? otherPharmacistIds.join(', ') : 'none'}`);
     console.log(`[handleCellClick] Selected time slot: ${cellStartTime}-${cellEndTime}`);
 
@@ -2257,14 +2225,14 @@ const getAssignmentForCell = (
       rotaId,
       assignmentIndices: [clickedAssignmentIndex],
       currentPharmacistId,
-      location: isLunchCover ? "Dispensary (Lunch Cover)" : assignment.location,
+      location: assignment.location,
       date: assignmentDate,
       startTime: cellStartTime || assignment.startTime,
       endTime: cellEndTime || assignment.endTime,
       otherPharmacistIds, // Keep track of other pharmacists in the same cell
-      // Add appropriate newAssignment based on the type
-      newAssignment: isLunchCover ? {
-        location: "Dispensary", // Keep this as Dispensary to match backend expectations
+      // Add any special flags from the assignment
+      newAssignment: assignment.isLunchCover ? {
+        location: assignment.location,
         type: "dispensary",
         startTime: cellStartTime || assignment.startTime,
         endTime: cellEndTime || assignment.endTime,
@@ -2288,26 +2256,17 @@ const getAssignmentForCell = (
   const isManagement = selectedCell.location === "Management Time";
   let isDispensary = false;
   let isClinic = false;
-  let isLunchCover = false;
   
   if (newAssignment) {
     isDispensary = newAssignment.type === "dispensary";
     isClinic = newAssignment.type === "clinic";
-    isLunchCover = newAssignment.isLunchCover === true;
-  }
-  
-  // Also check the location name for lunch cover
-  if (selectedCell.location === "Dispensary (Lunch Cover)") {
-    isLunchCover = true;
-    isDispensary = true;
   }
   
   console.log(`[handlePharmacistSelect] Cell category: ` +
     `${isUnavailable ? 'Unavailable' : ''}` +
     `${isManagement ? 'Management' : ''}` +
     `${isDispensary ? 'Dispensary' : ''}` +
-    `${isClinic ? 'Clinic' : ''}` +
-    `${isLunchCover ? ' (Lunch Cover)' : ''}`);
+    `${isClinic ? 'Clinic' : ''}`);
 
   // Log information about other pharmacists in the cell
   if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
@@ -2321,63 +2280,9 @@ const getAssignmentForCell = (
     const isWard = selectedCell.location.includes("Ward") || 
                    selectedCell.location.includes("ITU") || 
                    selectedCell.location.includes("Emergency Assessment Unit");
-                   
-    // For lunch cover, first check if there's already an existing lunch cover assignment we need to update
-    if (isLunchCover) {
-      console.log("[handlePharmacistSelect] Searching for existing lunch cover assignment to update");
-      
-      // Find the rota for this date
-      const rotaForDate = allRotas.find((r: any) => r._id === selectedCell.rotaId);
-      
-      if (rotaForDate) {
-        // Look for any existing lunch cover assignment for this date
-        const existingLunchCoverIndex = rotaForDate.assignments.findIndex((a: any) => 
-          a.type === "dispensary" && 
-          a.isLunchCover === true
-        );
-        
-        if (existingLunchCoverIndex !== -1) {
-          console.log(`[handlePharmacistSelect] Found existing lunch cover assignment at index ${existingLunchCoverIndex}, updating it instead of creating a new one`);
-          
-          // Update the existing lunch cover assignment with the new pharmacist
-          await updateAssignment({
-            rotaId: selectedCell.rotaId,
-            assignmentIndex: existingLunchCoverIndex,
-            pharmacistId
-            // Don't include newAssignment to preserve other properties
-          });
-          
-          console.log("[handlePharmacistSelect] Successfully updated existing lunch cover assignment");
-          
-          // Skip standard new assignment creation for lunch cover
-          // We'll still handle scope-based functionality below if needed
-        } else {
-          console.log("[handlePharmacistSelect] No existing lunch cover assignment found, will create a new one");
-          
-          // Create a new lunch cover assignment
-          await updateAssignment({
-            rotaId: selectedCell.rotaId,
-            assignmentIndex: -1,
-            pharmacistId,
-            newAssignment
-          });
-          console.log("[handlePharmacistSelect] New lunch cover assignment created.");
-        }
-      } else {
-        console.log("[handlePharmacistSelect] Could not find rota for this date, creating new lunch cover assignment");
-        
-        // Create a new lunch cover assignment as fallback
-        await updateAssignment({
-          rotaId: selectedCell.rotaId,
-          assignmentIndex: -1,
-          pharmacistId,
-          newAssignment
-        });
-        console.log("[handlePharmacistSelect] Fallback new lunch cover assignment created.");
-      }
-    } else if (newAssignment) {
-      // Regular non-lunch cover new assignment handling
-      console.log("[handlePharmacistSelect] Handling regular new assignment creation.");
+
+    if (newAssignment) {
+      console.log("[handlePharmacistSelect] Handling new assignment creation.");
       
       // Handle specific cell types with appropriate assignment types
       if (isUnavailable) {
@@ -2400,8 +2305,7 @@ const getAssignmentForCell = (
       console.log("[handlePharmacistSelect] Initial new assignment created.");
 
       // If scope is day or week, create additional slots
-      // Skip this part for lunch cover assignments - they shouldn't be duplicated for all time slots
-      if (scope !== "slot" && !isLunchCover) {
+      if (scope !== "slot") {
         console.log(`[handlePharmacistSelect] Creating additional slots for scope: ${scope}`);
         // Get all time slots without filtering out the selected one
         const timeSlots = TIME_SLOTS.map(slot => ({
@@ -2504,6 +2408,27 @@ const getAssignmentForCell = (
               });
               
               console.log(`[handlePharmacistSelect] Replaced specific pharmacist successfully (preserving others)`);
+
+              // Important: Update the local rotaAssignments state to reflect the change
+              // This ensures future updates will correctly identify the current assignment state
+              setRotaAssignments(prev => {
+                return prev.map(a => {
+                  // Update specific assignment matching the same criteria
+                  if (a.date === selectedCell.date &&
+                      a.location === selectedCell.location &&
+                      ((a.startTime === selectedCell.startTime && a.endTime === selectedCell.endTime) ||
+                       (a.isLunchCover && selectedCell.newAssignment?.isLunchCover)) &&
+                      a.pharmacistId === selectedCell.currentPharmacistId) {
+                    return {
+                      ...a,
+                      pharmacistId: pharmacistId,
+                      // Preserve the isLunchCover flag if present
+                      isLunchCover: a.isLunchCover || selectedCell.newAssignment?.isLunchCover
+                    };
+                  }
+                  return a;
+                });
+              });
 
               // For time slot specific assignments, make sure to retain other pharmacists who might be in this cell
               if (selectedCell.otherPharmacistIds && selectedCell.otherPharmacistIds.length > 0) {
@@ -3048,89 +2973,7 @@ const getAssignmentForCell = (
     // Refresh the local state to show the updated assignments
     console.log("[handlePharmacistSelect] Refreshing local rotaAssignments state.");
     
-    // For dispensary assignments, first update our local state to reflect the change immediately
-    if (isDispensary || selectedCell.location === "Dispensary" || selectedCell.location === "Dispensary (Lunch Cover)") {
-      console.log("[handlePharmacistSelect] Immediately updating local dispensary assignment");
-      console.log(`[handlePharmacistSelect] Location: ${selectedCell.location}, isLunchCover: ${selectedCell.newAssignment?.isLunchCover}`);
-      
-      // Check if we're dealing with a lunch cover assignment
-      const isLunchCoverAssignment = selectedCell.location === "Dispensary (Lunch Cover)" || selectedCell.newAssignment?.isLunchCover === true;
-      
-      // Find any existing lunch cover assignments we need to remove
-      let hasRemoved = false;
-      if (isLunchCoverAssignment) {
-        console.log("[handlePharmacistSelect] Removing any previous lunch cover assignments for this date");
-        
-        // Remove all lunch cover assignments for this date to ensure we don't have duplicates
-        const withoutPreviousLunchCovers = rotaAssignments.filter(a => {
-          if (a.date === selectedCell.date && a.type === "dispensary" && a.isLunchCover === true) {
-            console.log(`[handlePharmacistSelect] Removing previous lunch cover assignment from ${getPharmacistName(a.pharmacistId)}`);
-            hasRemoved = true;
-            return false; // Remove this assignment
-          }
-          return true; // Keep all other assignments
-        });
-        
-        if (hasRemoved) {
-          // Update state without the previous lunch cover assignments
-          setRotaAssignments(withoutPreviousLunchCovers);
-          
-          // Add the new lunch cover assignment
-          const newLunchCoverAssignment = {
-            date: selectedCell.date,
-            type: "dispensary",
-            location: "Dispensary",
-            startTime: selectedCell.startTime,
-            endTime: selectedCell.endTime,
-            isLunchCover: true,
-            pharmacistId: pharmacistId
-          };
-          
-          console.log(`[handlePharmacistSelect] Adding new lunch cover assignment for ${getPharmacistName(pharmacistId)}`);
-          
-          // Update the state with the new lunch cover assignment
-          setRotaAssignments(prev => [...prev, newLunchCoverAssignment]);
-          return; // Skip the regular update below since we've handled it specially
-        }
-      }
-      
-      // Regular update for non-lunch cover or if we didn't find any lunch covers to remove
-      const updatedAssignments = rotaAssignments.map(a => {
-        // Special handling for lunch cover assignments
-        if (isLunchCoverAssignment && a.date === selectedCell.date && a.type === "dispensary" && a.isLunchCover === true) {
-          console.log(`[handlePharmacistSelect] Found lunch cover assignment to update: ${getPharmacistName(a.pharmacistId)} → ${getPharmacistName(pharmacistId)}`);
-          
-          // Return the updated lunch cover assignment
-          return {
-            ...a,
-            pharmacistId
-          };
-        }
-        // Regular dispensary assignments
-        else if (!isLunchCoverAssignment && 
-                a.date === selectedCell.date && 
-                a.type === "dispensary" && 
-                a.location === selectedCell.location && 
-                a.startTime === selectedCell.startTime && 
-                a.endTime === selectedCell.endTime && 
-                a.pharmacistId === selectedCell.currentPharmacistId) {
-          
-          console.log(`[handlePharmacistSelect] Found regular dispensary assignment to update: ${getPharmacistName(a.pharmacistId)} → ${getPharmacistName(pharmacistId)}`);
-          
-          // Return a new assignment with updated pharmacistId
-          return {
-            ...a,
-            pharmacistId
-          };
-        }
-        return a;
-      });
-      
-      // Update the local state immediately
-      setRotaAssignments(updatedAssignments);
-    }
-    
-    // Also get fresh assignments from the server to ensure we have the most accurate state
+    // Get fresh assignments directly from the server to ensure we have the most accurate state
     // This ensures we preserve all multi-pharmacist cells exactly as they are in the database
     const refreshedAssignments = allRotas.flatMap((r: any) => { 
       // Map each assignment to include its date
@@ -3138,12 +2981,12 @@ const getAssignmentForCell = (
       return assignmentsWithDate;
     });
     
-    // If we have any assignments from server, update our state
+    // If we have any assignments, update our state
     if (refreshedAssignments.length > 0) {
       setRotaAssignments(refreshedAssignments);
-      console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments from server.`);
+      console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments.`);
     } else {
-      console.warn("[handlePharmacistSelect] No assignments found during server refresh.");
+      console.warn("[handlePharmacistSelect] No assignments found during refresh, keeping existing state.");
     }
     
     // If in edit mode of published rota and we have a callback, notify parent about changes
@@ -3516,7 +3359,7 @@ const getAssignmentForCell = (
               {(effectiveViewOnly || publishedRota) && (
                 <button
                   onClick={handleDownloadPDF}
-                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded flex items-center"
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-3 py-1 rounded flex items-center mr-2"
                   title="Download PDF of rota"
                 >
                   <svg className="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4260,249 +4103,6 @@ const getAssignmentForCell = (
           currentPharmacistId={selectedCell.currentPharmacistId}
           location={selectedCell.location}
         />
-      )}
-      {/* Pharmacist Report Modal */}
-      {showPharmacistReport && selectedPharmacistForReport && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg p-6 w-full max-w-4xl max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-center mb-4">
-              <h3 className="text-xl font-bold">
-                Weekly Schedule for {pharmacists.find(p => p._id === selectedPharmacistForReport)?.displayName || 'Pharmacist'}
-              </h3>
-              <button 
-                onClick={() => setShowPharmacistReport(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="overflow-auto flex-1">
-              <table className="min-w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="p-2 border text-left">Day</th>
-                    <th className="p-2 border text-left">Time</th>
-                    <th className="p-2 border text-left">Location</th>
-                    <th className="p-2 border text-left">Type</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from({ length: 7 }).map((_, dayOffset) => {
-                    const date = new Date(selectedMonday);
-                    date.setDate(date.getDate() + dayOffset);
-                    const dayName = DAYS[date.getDay()];
-                    const isoDate = date.toISOString().split('T')[0];
-                    
-                    // Get all assignments for this pharmacist on this day
-                    const dayAssignments = rotaAssignments.filter(a => 
-                      a.pharmacistId === selectedPharmacistForReport && 
-                      a.date === isoDate
-                    );
-                    
-                    if (dayAssignments.length === 0) return null;
-                    
-                    // Define standard time slots
-                    const standardTimeSlots = [
-                      { start: '09:00', end: '11:00' },
-                      { start: '11:00', end: '13:00' },
-                      { start: '13:00', end: '15:00' },
-                      { start: '15:00', end: '17:00' }
-                    ];
-                                        // Process assignments into time slots
-                    const timeSlotAssignments = standardTimeSlots.map(slot => {
-                      // Find all assignments that overlap with this time slot
-                      const allAssignments = dayAssignments.filter(assignment => {
-                        const assignmentStart = assignment.startTime || '00:00';
-                        const assignmentEnd = assignment.endTime || '23:59';
-                        
-                        // Check if assignment overlaps with current time slot
-                        return (
-                          (assignmentStart <= slot.start && assignmentEnd > slot.start) || // starts before and ends during/after
-                          (assignmentStart >= slot.start && assignmentStart < slot.end)  // starts during
-                        );
-                      });
-                      
-                      // Check for protected rota time (which appears as 'Unavailable' in main rota)
-                      // We'll check this later after checking for dispensary/clinic assignments
-                      const protectedTimePharmacists = getProtectedRotaTimePharmacists(isoDate, slot);
-                      const hasProtectedTime = protectedTimePharmacists.some(p => p._id === selectedPharmacistForReport);
-                      
-                      // Check for dispensary or clinic assignments first (highest priority)
-                      const hasDispensary = allAssignments.some(a => a.type === 'dispensary');
-                      const hasClinic = allAssignments.some(a => a.type === 'clinic');
-                      
-                      // Then check for management/unavailable/protected time
-                      const hasManagement = allAssignments.some(a => a.type === 'management');
-                      const hasUnavailable = allAssignments.some(a => a.type === 'unavailable');
-                      
-                      const assignmentsInSlot = [];
-                      
-                      // Priority order:
-                      // 1. Dispensary (including lunch cover)
-                      // 2. Clinic
-                      // 3. Management Time
-                      // 4. Unavailable/Protected Time
-                      // 5. Ward
-                      
-                      if (hasDispensary) {
-                        // Show dispensary assignments (including lunch cover)
-                        assignmentsInSlot.push(...allAssignments.filter(a => a.type === 'dispensary'));
-                      } else if (hasClinic) {
-                        // Show clinic assignments if no dispensary
-                        assignmentsInSlot.push(...allAssignments.filter(a => a.type === 'clinic'));
-                      } else if (hasManagement) {
-                        // Show management time if no dispensary or clinic
-                        assignmentsInSlot.push(...allAssignments.filter(a => a.type === 'management'));
-                      } else if (hasUnavailable || hasProtectedTime) {
-                        // Show unavailable or protected time if no other assignments
-                        if (hasUnavailable) {
-                          assignmentsInSlot.push(...allAssignments.filter(a => a.type === 'unavailable'));
-                        } else if (hasProtectedTime) {
-                          // Add protected time as an unavailable assignment
-                          assignmentsInSlot.push({
-                            type: 'unavailable',
-                            location: 'Protected Rota Time',
-                            startTime: slot.start,
-                            endTime: slot.end
-                          });
-                        }
-                      } else {
-                        // Otherwise, show all assignments (likely just wards)
-                        assignmentsInSlot.push(...allAssignments);
-                      }
-                      
-                      return {
-                        ...slot,
-                        assignments: assignmentsInSlot
-                      };
-                    });
-                    
-                    return timeSlotAssignments.map((slot, timeIndex) => {
-                      const { start, end, assignments } = slot;
-                      const hasAssignments = assignments.length > 0;
-                      
-                      // If no assignments and it's not the first row, skip this time slot
-                      if (!hasAssignments && timeIndex > 0) return null;
-                      
-                      return (
-                        <tr key={`${dayOffset}-${timeIndex}`} className={timeIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                          {timeIndex === 0 && (
-                            <td className="p-2 border" rowSpan={timeSlotAssignments.filter(ts => ts.assignments.length > 0).length}>
-                              {dayName}<br />
-                              <span className="text-xs text-gray-500">{isoDate}</span>
-                            </td>
-                          )}
-                          <td className="p-2 border">{start} - {end}</td>
-                          <td className="p-2 border">
-                            {hasAssignments ? (
-                              assignments.map((a, idx) => (
-                                <div key={idx} className={idx > 0 ? 'mt-1 pt-1 border-t' : ''}>
-                                  {['management', 'unavailable'].includes(a.type) 
-                                    ? a.type.charAt(0).toUpperCase() + a.type.slice(1)
-                                    : a.location.includes('Lunch Cover') 
-                                      ? a.location 
-                                      : `${a.location}${a.isLunchCover ? ' (Lunch Cover)' : ''}`}
-                                </div>
-                              ))
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                          <td className="p-2 border">
-                            {hasAssignments ? (
-                              assignments.map((a, idx) => (
-                                <div key={idx} className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
-                                  a.type === 'unavailable' ? 'text-red-600 font-medium' : 
-                                  a.type === 'management' ? 'text-blue-600 font-medium' : ''
-                                }`}>
-                                  {a.type === 'unavailable' 
-                                    ? a.location === 'Protected Rota Time' ? 'Protected Time' : 'Unavailable' 
-                                    : a.type === 'management' 
-                                      ? 'Management Time' 
-                                      : a.type.charAt(0).toUpperCase() + a.type.slice(1)}
-                                </div>
-                              ))
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    }).filter(Boolean); // Remove any null entries from filtered time slots
-                  })}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-4 flex justify-end">
-              <button
-                onClick={() => setShowPharmacistReport(false)}
-                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Pharmacist Report Controls - Added under the table */}
-      {rotaGenerated && (
-        <div className="mt-6 mx-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-          <h3 className="text-lg font-semibold mb-3 text-gray-800">Pharmacist Schedule Report</h3>
-          <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-end">
-            <div className="w-full sm:flex-1">
-              <label htmlFor="pharmacist-select" className="block text-sm font-medium text-gray-700 mb-1">
-                Select Pharmacist
-              </label>
-              <select
-                id="pharmacist-select"
-                value={selectedPharmacistForReport || ''}
-                onChange={(e) => setSelectedPharmacistForReport(e.target.value as Id<"pharmacists">)}
-                className="w-full bg-white border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              >
-                <option value="">Choose a pharmacist...</option>
-                {Array.from(new Set(rotaAssignments
-                  .filter(a => a.pharmacistId && selectedPharmacistIds.includes(a.pharmacistId))
-                  .map(a => a.pharmacistId)
-                ))
-                .map(pharmacistId => ({
-                  id: pharmacistId,
-                  pharmacist: pharmacists.find(p => p._id === pharmacistId)
-                }))
-                .filter(item => item.pharmacist) // Filter out any undefined pharmacists
-                .sort((a, b) => {
-                  // Sort by displayName or name, case-insensitive
-                  const nameA = (a.pharmacist?.displayName || a.pharmacist?.name || '').toLowerCase();
-                  const nameB = (b.pharmacist?.displayName || b.pharmacist?.name || '').toLowerCase();
-                  return nameA.localeCompare(nameB);
-                })
-                .map(({ id, pharmacist }) => (
-                  <option key={id} value={id}>
-                    {pharmacist ? (pharmacist.displayName || pharmacist.name) : 'Unknown'}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              onClick={() => selectedPharmacistForReport && setShowPharmacistReport(true)}
-              disabled={!selectedPharmacistForReport}
-              className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title={!selectedPharmacistForReport ? 'Please select a pharmacist first' : 'View weekly schedule'}
-            >
-              <span className="flex items-center justify-center">
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                View Weekly Schedule
-              </span>
-            </button>
-          </div>
-          <p className="text-sm text-gray-600 mt-2">
-            View a detailed weekly schedule for the selected pharmacist
-          </p>
-        </div>
       )}
     </div>
   );

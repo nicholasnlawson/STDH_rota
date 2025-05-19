@@ -1,0 +1,11 @@
+{
+  "projectConfig": {
+    "scheduledFunctions": [
+      {
+        "cronSchedule": "0 3 * * *",
+        "functionName": "cleanup-old-draft-rotas",
+        "args": {}
+      }
+    ]
+  }
+}

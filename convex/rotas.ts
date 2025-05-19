@@ -1,7 +1,9 @@
-import { mutation, query, internalMutation } from "./_generated/server";
+import { mutation, query, internalMutation, internalAction } from "./_generated/server";
 import { v } from "convex/values";
 import { internal } from "./_generated/api";
 import { Doc, Id } from "./_generated/dataModel";
+import { action } from "./_generated/server";
+import { cronJobs } from "convex/server";
 
 // Fisher-Yates shuffle for randomizing pharmacist selection
 function shuffleArray<T>(array: T[]): T[] {
@@ -3847,16 +3849,260 @@ export const getRota = query({
   },
 });
 
+// Helper type for the delete result
+type DeleteResult = {
+  deletedCount: number;
+  deletedIds: string[];
+  message: string;
+};
+
+/**
+ * Helper function to delete a rota and all its versions (draft/published)
+ */
+async function deleteRotaAndVersions(ctx: any, rotaId: string) {
+  // First get the rota to find its date and weekStartDate
+  const rota = await ctx.db.get(rotaId);
+  if (!rota) {
+    console.error(`[deleteRotaAndVersions] Rota ${rotaId} not found`);
+    return false;
+  }
+  
+  console.log(`[deleteRotaAndVersions] Looking for rotas with date: ${rota.date} and weekStartDate: ${rota.weekStartDate}`);
+  
+  try {
+    // Find all rotas for the same date (both draft and published)
+    const rotasToDelete = await ctx.db
+      .query("rotas")
+      .filter((q: any) => 
+        q.or(
+          q.eq(q.field("date"), rota.date),
+          q.and(
+            q.eq(q.field("weekStartDate"), rota.weekStartDate),
+            q.eq(q.field("status"), rota.status)
+          )
+        )
+      )
+      .collect();
+      
+    console.log(`[deleteRotaAndVersions] Found ${rotasToDelete.length} rotas to delete`);
+    
+    // Delete all versions
+    for (const r of rotasToDelete) {
+      try {
+        await ctx.db.delete(r._id);
+        console.log(`[deleteRotaAndVersions] Deleted rota ${r._id} (${r.status}) for date ${r.date}`);
+      } catch (error) {
+        console.error(`[deleteRotaAndVersions] Error deleting rota ${r._id}:`, error);
+        // Continue with next rota even if one fails
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error('[deleteRotaAndVersions] Error finding rotas to delete:', error);
+    return false;
+  }
+}
+
+// Delete draft rotas for a specific date or date range
+export const deleteDraftRotas = mutation({
+  args: {
+    weekStartDate: v.optional(v.string()),
+    beforeDate: v.optional(v.string()),
+    adminConfirmation: v.string()
+  },
+  handler: async (ctx, args) => {
+    // Verify admin confirmation
+    if (args.adminConfirmation !== 'CONFIRM_DELETE_DRAFT_ROTAS') {
+      throw new Error('Admin confirmation required to delete draft rotas');
+    }
+
+    console.log('[deleteDraftRotas] Starting deletion of draft rotas');
+    
+    // Build the base query for draft rotas
+    let query = ctx.db.query("rotas").filter((q: any) => 
+      q.eq(q.field("status"), "draft")
+    );
+
+    // Apply date filters if provided
+    if (args.weekStartDate) {
+      const weekStart = args.weekStartDate;
+      query = query.filter((q: any) => 
+        q.eq(q.field("weekStartDate"), weekStart)
+      );
+      console.log(`[deleteDraftRotas] Filtering by week start date: ${weekStart}`);
+    }
+    
+    if (args.beforeDate) {
+      const beforeDate = args.beforeDate;
+      query = query.filter((q: any) => 
+        q.lt(q.field("date"), beforeDate)
+      );
+      console.log(`[deleteDraftRotas] Filtering by before date: ${beforeDate}`);
+    }
+
+    // Get draft rotas to delete
+    const draftRotas = await query.collect();
+    console.log(`[deleteDraftRotas] Found ${draftRotas.length} draft rotas to delete`);
+    
+    if (draftRotas.length === 0) {
+      console.log('[deleteDraftRotas] No draft rotas found matching the criteria');
+      return {
+        deletedCount: 0,
+        deletedIds: [],
+        message: 'No draft rotas found matching the criteria'
+      };
+    }
+    
+    const deletedIds: string[] = [];
+    const deletedDates = new Set<string>();
+    
+    // Delete each draft rota
+    for (const rota of draftRotas) {
+      try {
+        console.log(`[deleteDraftRotas] Processing draft rota:`, {
+          id: rota._id,
+          date: rota.date,
+          weekStartDate: (rota as any).weekStartDate,
+          status: rota.status
+        });
+        
+        // Delete any related rotas (in case there are multiple versions)
+        await deleteRotaAndVersions(ctx, rota._id);
+        
+        deletedIds.push(rota._id);
+        deletedDates.add(rota.date);
+        console.log(`[deleteDraftRotas] Successfully processed draft rota ${rota._id}`);
+      } catch (error) {
+        console.error(`[deleteDraftRotas] Failed to process draft rota ${rota._id}:`, error);
+        // Continue with next rota even if one fails
+      }
+    }
+
+    const result = {
+      deletedCount: deletedIds.length,
+      deletedIds,
+      affectedDates: Array.from(deletedDates),
+      message: `Successfully deleted ${deletedIds.length} draft rotas across ${deletedDates.size} dates.`
+    };
+    
+    console.log('[deleteDraftRotas] Deletion completed:', result);
+    return result;
+  }
+});
+
+export const deleteRotas = mutation({
+  args: {
+    // Allow deleting rotas for a specific week, or before a certain date
+    weekStartDate: v.optional(v.string()),
+    beforeDate: v.optional(v.string()),
+    // Optional status filter (draft, published, or both if not specified)
+    status: v.optional(v.union(v.literal("draft"), v.literal("published"), v.literal("archived"))),
+    // Require admin confirmation to prevent accidental deletion
+    adminConfirmation: v.string()
+  },
+  handler: async (ctx, args) => {
+    // If specifically deleting draft rotas, we'll handle it in the same function
+    // since we can't call the mutation directly from within another mutation
+    if (args.status === 'draft') {
+      console.log('[deleteRotas] Handling draft rota deletion directly');
+      // We'll just continue with the rest of the function which will handle draft rotas
+    }
+
+    // Verify admin confirmation is correct for non-draft deletions
+    if (args.adminConfirmation !== "CONFIRM_DELETE_ROTAS") {
+      throw new Error("Invalid admin confirmation. Please type CONFIRM_DELETE_ROTAS to proceed.");
+    }
+    
+    let query = ctx.db.query("rotas");
+    
+    // Apply status filter if specified
+    if (args.status) {
+      query = query.filter((q: any) => q.eq(q.field("status"), args.status));
+      console.log(`[deleteRotas] Filtering by status: ${args.status}`);
+    }
+    
+    // Add week filter if specified
+    if (args.weekStartDate && typeof args.weekStartDate === 'string') {
+      // Get the week end date (Sunday)
+      const startDate = new Date(args.weekStartDate);
+      const endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      const weekEndDate = endDate.toISOString().split('T')[0];
+      
+      // Filter by date range
+      query = query.filter((q: any) => 
+        q.and(
+          q.gte(q.field("date"), args.weekStartDate as string),
+          q.lte(q.field("date"), weekEndDate)
+        )
+      );
+      
+      console.log(`[deleteRotas] Filtering by week: ${args.weekStartDate} to ${weekEndDate}`);
+    }
+    
+    // Add before date filter if specified
+    if (args.beforeDate && typeof args.beforeDate === 'string') {
+      const beforeDate = args.beforeDate;
+      query = query.filter((q: any) => q.lt(q.field("date"), beforeDate));
+      console.log(`[deleteRotas] Filtering by before date: ${beforeDate}`);
+    }
+    
+    // Get rotas to delete (we'll process them in batches to avoid timeouts)
+    const rotasToProcess = await query.collect();
+    console.log(`[deleteRotas] Found ${rotasToProcess.length} rotas to process`);
+    
+    // Track deleted rotas
+    const deletedIds: string[] = [];
+    const processedDates = new Set<string>();
+    
+    for (const rota of rotasToProcess) {
+      try {
+        // Skip if we've already processed this date (to avoid duplicates)
+        if (processedDates.has(rota.date)) {
+          console.log(`[deleteRotas] Already processed date ${rota.date}, skipping...`);
+          continue;
+        }
+        
+        console.log(`[deleteRotas] Processing rotas for date:`, rota.date);
+        
+        // Delete all versions of this rota (draft and published)
+        const success = await deleteRotaAndVersions(ctx, rota._id);
+        
+        if (success) {
+          console.log(`[deleteRotas] Successfully processed rotas for date ${rota.date}`);
+          deletedIds.push(rota._id);
+          processedDates.add(rota.date);
+        } else {
+          console.error(`[deleteRotas] Failed to process rotas for date ${rota.date}`);
+        }
+      } catch (error) {
+        console.error(`[deleteRotas] Error processing rota ${rota._id}:`, error);
+        // Continue with next rota even if one fails
+      }
+    }
+    
+    // Return summary of deleted rotas
+    return {
+      deletedCount: deletedIds.length,
+      deletedIds: deletedIds,
+      message: `Successfully deleted ${deletedIds.length} rotas.`
+    };
+  }
+});
+
 export const deleteArchivedRotas = mutation({
   args: {
     // Allow deleting rotas for a specific week, or before a certain date
     weekStartDate: v.optional(v.string()),
     beforeDate: v.optional(v.string()),
     // Require admin confirmation to prevent accidental deletion
-    adminConfirmation: v.string()
+    adminConfirmation: v.string(),
+    // For backward compatibility, this function is kept but marked as deprecated
+    _deprecated: v.optional(v.literal(true))
   },
-  handler: async (ctx, args) => {
-    // Verify admin confirmation is correct
+  handler: async (ctx, args): Promise<DeleteResult> => {
+    // For archived rotas, we'll just use the existing implementation
     if (args.adminConfirmation !== "CONFIRM_DELETE_ARCHIVED_ROTAS") {
       throw new Error("Invalid admin confirmation. Please type CONFIRM_DELETE_ARCHIVED_ROTAS to proceed.");
     }
@@ -3880,26 +4126,52 @@ export const deleteArchivedRotas = mutation({
           q.lte(q.field("date"), weekEndDate)
         )
       );
-      
-      console.log(`[deleteArchivedRotas] Filtering by week: ${args.weekStartDate} to ${weekEndDate}`);
     }
     
     // Add before date filter if specified
     if (args.beforeDate && typeof args.beforeDate === 'string') {
       query = query.filter(q => q.lt(q.field("date"), args.beforeDate as string));
-      console.log(`[deleteArchivedRotas] Filtering by before date: ${args.beforeDate}`);
     }
     
     // Get archived rotas
     const rotasToDelete = await query.collect();
-    console.log(`[deleteArchivedRotas] Found ${rotasToDelete.length} archived rotas to delete`);
     
     // Delete each archived rota
     const deletedIds = [];
     for (const rota of rotasToDelete) {
-      await ctx.db.delete(rota._id);
-      deletedIds.push(rota._id);
-      console.log(`[deleteArchivedRotas] Deleted rota ${rota._id} for date ${rota.date}`);
+      try {
+        console.log(`Attempting to delete rota:`, {
+          id: rota._id,
+          date: rota.date,
+          status: rota.status
+        });
+        
+        // First verify the rota exists
+        const existingRota = await ctx.db.get(rota._id);
+        if (!existingRota) {
+          console.log(`Rota ${rota._id} not found, skipping...`);
+          continue;
+        }
+        
+        // Delete the rota
+        console.log(`Deleting rota ${rota._id}...`);
+        const result = await ctx.db.delete(rota._id);
+        console.log(`Delete result for ${rota._id}:`, result);
+        
+        // Verify deletion
+        const verify = await ctx.db.get(rota._id);
+        if (verify) {
+          console.error(`Failed to verify deletion of rota ${rota._id}`);
+          throw new Error(`Failed to verify deletion of rota ${rota._id}`);
+        }
+        
+        console.log(`Successfully deleted rota ${rota._id} for date ${rota.date}`);
+        deletedIds.push(rota._id);
+      } catch (error) {
+        console.error(`Failed to delete rota ${rota._id}:`, error);
+        // Rethrow the error to see it in the client
+        throw error;
+      }
     }
     
     // Return summary of deleted rotas
@@ -4045,6 +4317,54 @@ function addDays(dateString: string, days: number): string {
 }
 
 // Function to save free cell text to a rota
+// Clean up old draft rotas (older than 2 months)
+export const cleanUpOldDraftRotas = mutation({
+  args: {},
+  handler: async (ctx) => {
+    // Calculate date 2 months ago
+    const twoMonthsAgo = new Date();
+    twoMonthsAgo.setMonth(twoMonthsAgo.getMonth() - 2);
+    const twoMonthsAgoStr = twoMonthsAgo.toISOString().split('T')[0];
+    
+    console.log(`[cleanUpOldDraftRotas] Looking for draft rotas older than ${twoMonthsAgoStr}`);
+    
+    try {
+      // Get all rotas
+      const allRotas = await ctx.db.query("rotas").collect();
+      
+      // Filter draft rotas older than 2 months
+      const rotasToDelete = allRotas.filter((rota: any) => {
+        return rota.status === 'draft' && rota.date && rota.date < twoMonthsAgoStr;
+      });
+      
+      console.log(`[cleanUpOldDraftRotas] Found ${rotasToDelete.length} old draft rotas to delete`);
+      
+      // Delete each old draft rota
+      let deletedCount = 0;
+      for (const rota of rotasToDelete) {
+        try {
+          await ctx.db.delete(rota._id);
+          console.log(`[cleanUpOldDraftRotas] Deleted old draft rota ${rota._id} from ${rota.date}`);
+          deletedCount++;
+        } catch (error) {
+          console.error(`[cleanUpOldDraftRotas] Error deleting rota ${rota._id}:`, error);
+        }
+      }
+      
+      return {
+        success: true,
+        message: `Successfully deleted ${deletedCount} old draft rotas.`,
+        deletedCount,
+        totalFound: rotasToDelete.length
+      };
+      
+    } catch (error) {
+      console.error('[cleanUpOldDraftRotas] Error cleaning up old draft rotas:', error);
+      throw error;
+    }
+  },
+});
+
 export const saveFreeCellText = mutation({
   args: { 
     rotaId: v.id("rotas"),
