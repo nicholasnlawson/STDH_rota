@@ -7,14 +7,22 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist
-dist-ssr
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+
+# Environment variables
+.env
+.env.*
+!.env.example
 
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
 *.suo
 *.ntvs*
@@ -22,5 +30,23 @@ dist-ssr
 *.sln
 *.sw?
 
-# Ignored for the template, you probably want to remove it:
+# Sensitive files
+private_key.pem
+convex/private_key_pkcs8.pem
+convex/.env
+
+# Local development
+.convex/local/
+
+# Package manager files
 package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Local development
+.local-*
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

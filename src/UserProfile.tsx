@@ -39,6 +39,7 @@ interface UserProfileProps {
 export function UserProfile({ pharmacist }: UserProfileProps) {
   // Get the update mutation and required data
   const updatePharmacist = useMutation(api.pharmacists.update);
+  const changePassword = useMutation(api.auth.changePassword);
   const directorates = useQuery(api.requirements.listDirectorates) || [];
   
   // Fetch all unique special training types from directorates
@@ -51,6 +52,17 @@ export function UserProfile({ pharmacist }: UserProfileProps) {
   
   // State for editing mode
   const [isEditing, setIsEditing] = useState(false);
+  
+  // State for password management
+  const [showPasswordForm, setShowPasswordForm] = useState(false);
+  const [passwordData, setPasswordData] = useState({
+    currentPassword: "",
+    newPassword: "",
+    confirmPassword: ""
+  });
+  const [passwordError, setPasswordError] = useState<string | null>(null);
+  const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null);
+  
   const [editFormData, setEditFormData] = useState({
     ...pharmacist,
     firstName: pharmacist.firstName || "",
@@ -157,6 +169,77 @@ export function UserProfile({ pharmacist }: UserProfileProps) {
     });
   };
   
+  // Handle password change input
+  const handlePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    setPasswordData(prevData => ({
+      ...prevData,
+      [name]: value
+    }));
+  };
+
+  // Handle password update submission
+  const handlePasswordUpdate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setPasswordError(null);
+    setPasswordSuccess(null);
+    
+    // Simple validation
+    if (!passwordData.currentPassword) {
+      setPasswordError("Current password is required");
+      return;
+    }
+    
+    if (passwordData.newPassword.length < 8) {
+      setPasswordError("New password must be at least 8 characters");
+      return;
+    }
+    
+    if (passwordData.newPassword !== passwordData.confirmPassword) {
+      setPasswordError("New passwords do not match");
+      return;
+    }
+    
+    try {
+      // Get the current user from localStorage
+      const userData = localStorage.getItem('user');
+      if (!userData) {
+        setPasswordError("You must be logged in to change your password");
+        return;
+      }
+      
+      const user = JSON.parse(userData);
+      
+      // Call the change password mutation
+      await changePassword({
+        email: user.email,
+        currentPassword: passwordData.currentPassword,
+        newPassword: passwordData.newPassword,
+      });
+      
+      // If we get here, the password was updated successfully
+      setPasswordSuccess("Password updated successfully");
+      
+      // Reset form
+      setPasswordData({
+        currentPassword: "",
+        newPassword: "",
+        confirmPassword: ""
+      });
+      
+      // Update the user data in localStorage with the new password
+      // (we don't store the password in localStorage, but this keeps the timestamp updated)
+      const updatedUserData = {
+        ...user,
+        sessionToken: `${Date.now()}_${user.id}_${Math.random().toString(36).substring(2, 15)}`
+      };
+      localStorage.setItem('user', JSON.stringify(updatedUserData));
+    } catch (error) {
+      console.error("Error updating password:", error);
+      setPasswordError("Failed to update password");
+    }
+  };
+
   // Function to handle form submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -219,12 +302,21 @@ export function UserProfile({ pharmacist }: UserProfileProps) {
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-2xl font-semibold">My Profile</h2>
         {!isEditing ? (
-          <button
-            onClick={() => setIsEditing(true)}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700"
-          >
-            Edit Profile
-          </button>
+          <div className="flex items-center space-x-3">
+            <button
+              type="button"
+              onClick={() => setShowPasswordForm(!showPasswordForm)}
+              className="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 transition"
+            >
+              {showPasswordForm ? 'Hide Password Form' : 'Change Password'}
+            </button>
+            <button
+              onClick={() => setIsEditing(true)}
+              className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition"
+            >
+              Edit Profile
+            </button>
+          </div>
         ) : (
           <div className="flex gap-2">
             <button
@@ -627,6 +719,80 @@ export function UserProfile({ pharmacist }: UserProfileProps) {
                   </span>
                 ))}
               </div>
+            </div>
+          )}
+          
+          {/* Password Change Form in View Mode */}
+          {showPasswordForm && (
+            <div className="mt-8 border-t pt-6">
+              <h3 className="text-lg font-medium text-gray-900 mb-4">Change Password</h3>
+              <form onSubmit={handlePasswordUpdate} className="space-y-4">
+                <div>
+                  <label htmlFor="currentPassword" className="block text-sm font-medium text-gray-700">
+                    Current Password
+                  </label>
+                  <input
+                    type="password"
+                    id="currentPassword"
+                    name="currentPassword"
+                    value={passwordData.currentPassword}
+                    onChange={handlePasswordChange}
+                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                    required
+                  />
+                </div>
+                
+                <div>
+                  <label htmlFor="newPassword" className="block text-sm font-medium text-gray-700">
+                    New Password
+                  </label>
+                  <input
+                    type="password"
+                    id="newPassword"
+                    name="newPassword"
+                    value={passwordData.newPassword}
+                    onChange={handlePasswordChange}
+                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                    required
+                    minLength={8}
+                  />
+                </div>
+                
+                <div>
+                  <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700">
+                    Confirm New Password
+                  </label>
+                  <input
+                    type="password"
+                    id="confirmPassword"
+                    name="confirmPassword"
+                    value={passwordData.confirmPassword}
+                    onChange={handlePasswordChange}
+                    className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm"
+                    required
+                  />
+                </div>
+                
+                {passwordError && (
+                  <div className="text-sm text-red-600">{passwordError}</div>
+                )}
+                
+                {passwordSuccess && (
+                  <div className="text-sm text-green-600">{passwordSuccess}</div>
+                )}
+                
+                <div className="flex justify-between">
+                  <button
+                    type="submit"
+                    className="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                  >
+                    Update Password
+                  </button>
+                  <div className="text-sm text-gray-500 mt-1">
+                    Update your password here. Please make sure your new password is at least 8 characters long.
+                  </div>
+                </div>
+              </form>
             </div>
           )}
         </div>

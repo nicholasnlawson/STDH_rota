@@ -5,7 +5,7 @@ export const add = mutation({
   args: {
     name: v.string(), // Full name
     displayName: v.optional(v.string()), // "Appears in rota as"
-    email: v.optional(v.string()),
+    email: v.string(), // Required for authentication
     // Temporarily accept firstName and lastName during migration
     firstName: v.optional(v.string()),
     lastName: v.optional(v.string()),    

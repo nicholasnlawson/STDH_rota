@@ -6,6 +6,13 @@
         "functionName": "cleanup-old-draft-rotas",
         "args": {}
       }
-    ]
+    ],
+    "environmentVariables": {
+      "AUTH0_DOMAIN": "dev-2qy1z1r4n7j5w5l4.us.auth0.com"
+    }
+  },
+  "deployment": {
+    "type": "self-hosted",
+    "url": "http://127.0.0.1:3210"
   }
 }

@@ -3,10 +3,18 @@ import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
 
 const applicationTables = {
+  // Custom sessions table for admin authentication
+  sessions: defineTable({
+    userId: v.id("users"),
+    sessionId: v.string(),
+    createdAt: v.number(),
+  }).index("by_sessionId", ["sessionId"]),
+  
   pharmacists: defineTable({
     name: v.string(), // Full name
     displayName: v.optional(v.string()), // How the name appears in the rota
-    email: v.optional(v.string()),
+    email: v.string(), // Required for authentication
+    password: v.optional(v.string()), // Store password for authentication
     // Temporarily add legacy fields during migration
     firstName: v.optional(v.string()),
     lastName: v.optional(v.string()),

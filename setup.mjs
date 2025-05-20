@@ -2,7 +2,7 @@
  * This script runs `npx @convex-dev/auth` to help with setting up
  * environment variables for Convex Auth.
  *
- * You can safely delete it and remove it from package.json scripts.
+ * Modified to support self-hosted Convex instances.
  */
 
 import fs from "fs";
@@ -24,15 +24,21 @@ if (runOnceWorkflow && config.SETUP_SCRIPT_RAN !== undefined) {
   process.exit(0);
 }
 
-const result = spawnSync("npx", ["@convex-dev/auth", "--skip-git-check"], {
-  stdio: "inherit",
-});
+// Check if we're using self-hosted Convex
+if (config.CONVEX_SELF_HOSTED_URL) {
+  console.log("✓ Self-hosted Convex configuration detected. Skipping cloud deployment check.");
+  process.exit(0);
+} else {
+  // If not self-hosted, run the normal auth setup
+  const result = spawnSync("npx", ["@convex-dev/auth", "--skip-git-check"], {
+    stdio: "inherit",
+  });
 
-if (runOnceWorkflow) {
-  fs.writeFileSync(".env.local", `
+  if (runOnceWorkflow) {
+    fs.writeFileSync(".env.local", `
 SETUP_SCRIPT_RAN=1
 `, { flag: "a" });
+  }
+
+  process.exit(result.status);
 }
-
-
-process.exit(result.status);

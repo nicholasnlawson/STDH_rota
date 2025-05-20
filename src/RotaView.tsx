@@ -4398,12 +4398,27 @@ const getAssignmentForCell = (
                           <td className="p-2 border">
                             {hasAssignments ? (
                               assignments.map((a, idx) => (
-                                <div key={idx} className={idx > 0 ? 'mt-1 pt-1 border-t' : ''}>
-                                  {['management', 'unavailable'].includes(a.type) 
-                                    ? a.type.charAt(0).toUpperCase() + a.type.slice(1)
-                                    : a.location.includes('Lunch Cover') 
-                                      ? a.location 
-                                      : `${a.location}${a.isLunchCover ? ' (Lunch Cover)' : ''}`}
+                                <div 
+                                  key={idx} 
+                                  className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
+                                    a.type === 'ward' 
+                                      ? 'text-green-700 font-medium'
+                                      : a.type === 'dispensary' 
+                                        ? a.isLunchCover ? 'text-purple-600 font-medium' : 'text-purple-700 font-medium'
+                                        : a.type === 'clinic' 
+                                          ? 'text-red-600 font-medium' 
+                                          : a.type === 'management'
+                                            ? 'text-blue-600 font-medium'
+                                            : ''
+                                  }`}
+                                >
+                                  {a.type === 'management' 
+                                    ? 'Management Time'
+                                    : a.type === 'unavailable' 
+                                      ? 'Unavailable'
+                                      : a.location.includes('Lunch Cover') 
+                                        ? a.location 
+                                        : `${a.location}${a.isLunchCover ? ' (Lunch Cover)' : ''}`}
                                 </div>
                               ))
                             ) : (
@@ -4413,10 +4428,22 @@ const getAssignmentForCell = (
                           <td className="p-2 border">
                             {hasAssignments ? (
                               assignments.map((a, idx) => (
-                                <div key={idx} className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
-                                  a.type === 'unavailable' ? 'text-red-600 font-medium' : 
-                                  a.type === 'management' ? 'text-blue-600 font-medium' : ''
-                                }`}>
+                                <div 
+                                  key={idx} 
+                                  className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
+                                    a.type === 'ward' 
+                                      ? 'text-green-700 font-medium'
+                                      : a.type === 'dispensary' 
+                                        ? 'text-purple-700 font-medium' 
+                                        : a.type === 'clinic' 
+                                          ? 'text-red-600 font-medium'
+                                          : a.type === 'management' 
+                                            ? 'text-blue-600 font-medium' 
+                                            : a.type === 'unavailable' 
+                                              ? 'text-gray-600 font-medium' 
+                                              : ''
+                                  }`}
+                                >
                                   {a.type === 'unavailable' 
                                     ? a.location === 'Protected Rota Time' ? 'Protected Time' : 'Unavailable' 
                                     : a.type === 'management' 
@@ -4464,7 +4491,7 @@ const getAssignmentForCell = (
               >
                 <option value="">Choose a pharmacist...</option>
                 {Array.from(new Set(rotaAssignments
-                  .filter(a => a.pharmacistId && selectedPharmacistIds.includes(a.pharmacistId))
+                  .filter(a => a.pharmacistId) 
                   .map(a => a.pharmacistId)
                 ))
                 .map(pharmacistId => ({
