@@ -36,6 +36,29 @@ const applicationTables = {
       endTime: v.string(),   // e.g., "17:00"
     }))),
   }).index("by_band", ["band"]),
+  
+  technicians: defineTable({
+    name: v.string(), // Full name
+    displayName: v.optional(v.string()), // How the name appears in the rota
+    email: v.string(), // Required for authentication
+    password: v.optional(v.string()), // Store password for authentication
+    band: v.string(), // Band 4, 5, or 6
+    primaryWards: v.array(v.string()), // Primary wards assigned
+    isAccuracyChecker: v.boolean(), // Whether technician is an accuracy checker
+    isMedsRecTrained: v.boolean(), // Whether technician is medication reconciliation trained
+    isWarfarinTrained: v.optional(v.boolean()), // Whether technician is warfarin trained
+    isDefaultTechnician: v.optional(v.boolean()), // Whether this is the default technician
+    isAdmin: v.optional(v.boolean()), // Whether this user has admin privileges
+    preferences: v.array(v.string()),
+    availability: v.array(v.string()),
+    workingDays: v.optional(v.array(v.string())), // Usual working days (e.g., ["Monday", "Tuesday"])
+    specialistTraining: v.optional(v.array(v.string())),
+    notAvailableRules: v.optional(v.array(v.object({
+      dayOfWeek: v.string(), // e.g., "Wednesday"
+      startTime: v.string(), // e.g., "13:00"
+      endTime: v.string(),   // e.g., "17:00"
+    }))),
+  }).index("by_band", ["band"]),
 
   directorates: defineTable({
     name: v.string(),
@@ -145,7 +168,83 @@ const applicationTables = {
   }).index("by_weekStartDate", ["weekStartDate"]),
 };
 
+// Technician assignments table for rota requirements
+const technicianRequirementsTables = {
+  technicianRequirements: defineTable({
+    name: v.string(), // Assignment name (e.g., "Ward 3 - Accuracy Checking")
+    isActive: v.boolean(),
+    minTechnicians: v.number(), // Minimum number of technicians needed
+    idealTechnicians: v.number(), // Ideal number of technicians
+    requiresSpecialTraining: v.boolean(),
+    trainingType: v.optional(v.string()), // e.g., "AccuracyChecker", "WarfarinTrained"
+    difficulty: v.number(), // 1-10 scale
+    category: v.string(), // Category like "Dispensary", "Ward", etc.
+    includeByDefaultInRota: v.optional(v.boolean()), // Whether to include in rota by default
+    doNotSplitAssignment: v.optional(v.boolean()), // Whether technicians assigned here should not be assigned elsewhere
+    daysOfWeek: v.optional(v.array(v.string())), // Days of the week when this requirement is active (e.g., ["Monday", "Wednesday"])
+  }).index("by_name", ["name"]),
+  
+  // Store possible special training types for technicians
+  technicianTrainingTypes: defineTable({
+    name: v.string(), // Training type name
+    description: v.optional(v.string()),
+  }).index("by_name", ["name"]),
+  
+  // Technician rotas
+  technicianRotas: defineTable({
+    date: v.string(), // ISO date string (YYYY-MM-DD)
+    assignments: v.array(
+      v.object({
+        technicianId: v.id("technicians"),
+        type: v.string(), // Type of assignment (requirement, clinic, dispensary, etc.)
+        location: v.string(), // Name of assignment (ward, dispensary, etc.)
+        startTime: v.string(), // Start time (HH:MM format)
+        endTime: v.string(), // End time (HH:MM format)
+        category: v.optional(v.string()), // Assignment category
+      })
+    ),
+    conflicts: v.array(
+      v.object({
+        type: v.string(),
+        description: v.string(),
+        severity: v.string(), // warning, error
+      })
+    ),
+    includedWeekdays: v.array(v.string()), // List of weekdays included in this rota
+    staffIds: v.array(v.id("technicians")), // List of technicians included in this rota
+    status: v.string(), // draft, published, archived
+    publishedBy: v.optional(
+      v.object({
+        name: v.string(),
+        email: v.string(),
+      })
+    ),
+    publishedDate: v.optional(v.string()), // ISO date when published
+    publishDate: v.optional(v.string()), // Formatted date for display
+    publishTime: v.optional(v.string()), // Formatted time for display
+    freeCellText: v.optional(v.record(v.string(), v.string())), // Optional text for free cells
+    title: v.optional(v.string()), // Optional title for the rota
+  }).index("by_date", ["date"]),
+  
+  // Store saved rota configurations for technicians
+  technicianRotaConfigurations: defineTable({
+    weekStartDate: v.string(), // Monday date string (YYYY-MM-DD)
+    technicianIds: v.array(v.id("technicians")), // Selected technicians
+    includeWarfarinClinics: v.optional(v.boolean()),
+    selectedWeekdays: v.array(v.string()), // List of selected weekdays
+    workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+    ignoredUnavailableRules: v.optional(
+      v.object({
+        technicianId: v.string(),
+        ruleIndices: v.array(v.number()),
+      })
+    ),
+    lastUpdated: v.string(), // ISO datetime when last updated
+  }).index("by_weekStartDate", ["weekStartDate"]),
+};
+
 export default defineSchema({
   ...authTables,
   ...applicationTables,
+  ...technicianRequirementsTables,
 });

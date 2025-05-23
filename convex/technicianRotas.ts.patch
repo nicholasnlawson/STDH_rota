@@ -1,0 +1,18 @@
+--- technicianRotas.ts.orig
++++ technicianRotas.ts
+@@ -50,6 +50,7 @@
+     selectedWeekdays: v.optional(v.array(v.string())),
+     workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+     additionalRoles: v.optional(v.array(v.string())), // Names of additional roles to include in rota
++    rolesByDay: v.optional(v.record(v.string(), v.array(v.string()))), // Map of day names to array of role names for that day
+   },
+   handler: async (ctx, args) => {
+     // Return type definition
+@@ -729,6 +730,7 @@
+     selectedWeekdays: v.optional(v.array(v.string())),
+     workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+     additionalRoles: v.optional(v.array(v.string())), // Names of additional roles to include in rota
++    rolesByDay: v.optional(v.record(v.string(), v.array(v.string()))), // Map of day names to array of role names for that day
+   },
+   handler: async (ctx, args) => {
+     const rotaIdsByDate: Record<string, string> = {};

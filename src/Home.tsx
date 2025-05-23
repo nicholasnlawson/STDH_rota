@@ -17,7 +17,7 @@ interface HomeProps {
 }
 
 export default function Home({ isAdmin, userEmail }: HomeProps) {
-  const [view, setView] = useState<"pharmacists" | "requirements" | "rota" | "profile" | "publishedRotas" | "admin" | null>(null);
+  const [view, setView] = useState<"pharmacists" | "requirements" | "rota" | "profile" | "publishedRotas" | null>(null);
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const currentPharmacist = pharmacists.find(p => p.email === userEmail);
 
@@ -29,11 +29,11 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
         </div>
 
         <div className="flex flex-col gap-8 items-center">
-          <div className="flex gap-6 mb-8">
+          <div className="flex flex-wrap justify-center gap-4 mb-8">
             {/* Show Manage Pharmacists button only to admins */}
             {isAdmin && (
               <button
-                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-blue-600 text-white hover:bg-blue-700 ${view === "pharmacists" ? "ring-4 ring-blue-300" : ""}`}
+                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-blue-600 text-white hover:bg-blue-700 transition-colors ${view === "pharmacists" ? "ring-4 ring-blue-300" : ""}`}
                 onClick={() => setView("pharmacists")}
               >
                 Manage Pharmacists
@@ -42,7 +42,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
             {/* Requirements can only be updated by administrators */}
             {isAdmin && (
               <button
-                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-green-600 text-white hover:bg-green-700 ${view === "requirements" ? "ring-4 ring-green-300" : ""}`}
+                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-green-600 text-white hover:bg-green-700 transition-colors ${view === "requirements" ? "ring-4 ring-green-300" : ""}`}
                 onClick={() => setView("requirements")}
               >
                 Update Rota Requirements
@@ -51,7 +51,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
             {/* Only admins can access the Create Rota feature */}
             {isAdmin && (
               <button
-                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-purple-600 text-white hover:bg-purple-700 ${view === "rota" ? "ring-4 ring-purple-300" : ""}`}
+                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-purple-600 text-white hover:bg-purple-700 transition-colors ${view === "rota" ? "ring-4 ring-purple-300" : ""}`}
                 onClick={() => setView("rota")}
               >
                 Create Rota
@@ -59,27 +59,18 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
             )}
             {/* View Published Rotas button for all users */}
             <button
-              className={`px-6 py-4 rounded shadow text-lg font-semibold bg-yellow-500 text-white hover:bg-yellow-600 ${view === "publishedRotas" ? "ring-4 ring-yellow-300" : ""}`}
+              className={`px-6 py-4 rounded shadow text-lg font-semibold bg-yellow-500 text-white hover:bg-yellow-600 transition-colors ${view === "publishedRotas" ? "ring-4 ring-yellow-300" : ""}`}
               onClick={() => setView("publishedRotas")}
             >
               View Published Rotas
             </button>
             {/* My Profile button for all users */}
             <button
-              className={`px-6 py-4 rounded shadow text-lg font-semibold bg-teal-600 text-white hover:bg-teal-700 ${view === "profile" ? "ring-4 ring-teal-300" : ""}`}
+              className={`px-6 py-4 rounded shadow text-lg font-semibold bg-teal-600 text-white hover:bg-teal-700 transition-colors ${view === "profile" ? "ring-4 ring-teal-300" : ""}`}
               onClick={() => setView("profile")}
             >
               My Profile
             </button>
-            {/* Admin tab for admin users */}
-            {isAdmin && (
-              <button
-                className={`px-6 py-4 rounded shadow text-lg font-semibold bg-red-600 text-white hover:bg-red-700 ${view === "admin" ? "ring-4 ring-red-300" : ""}`}
-                onClick={() => setView("admin")}
-              >
-                Admin
-              </button>
-            )}
           </div>
 
           {view === "pharmacists" && isAdmin && <PharmacistList />}
@@ -97,7 +88,7 @@ export default function Home({ isAdmin, userEmail }: HomeProps) {
               workingDays: currentPharmacist.workingDays ?? [],
             }} />
           )}
-          {view === "admin" && isAdmin && <AdminPage />}
+
           {!view && (
             <div className="text-gray-600 text-lg mt-10">
               Select an option above to get started.

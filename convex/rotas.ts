@@ -4206,16 +4206,29 @@ export const publishRota = mutation({
       let userName = "Unknown User";
       const identity = await ctx.auth.getUserIdentity();
       
+      // First priority: Use the provided userName from the frontend
       if (providedUserName) {
         userName = providedUserName;
-      } else if (identity?.name) {
-        userName = identity.name;
-      } else if (identity?.email) {
-        const email = identity.email;
-        userName = email.split('@')[0]
-          .split(/[._]/)
-          .map(part => part.charAt(0).toUpperCase() + part.slice(1))
-          .join(' ');
+        console.log(`[publishRota] Using provided userName: ${userName}`);
+      } 
+      // Second priority: Use the authenticated identity
+      else if (identity) {
+        if (identity.name && identity.email) {
+          userName = `${identity.name} (${identity.email})`;
+        } else if (identity.name) {
+          userName = identity.name;
+        } else if (identity.email) {
+          // Format email address into a readable name
+          const email = identity.email;
+          const namePart = email.split('@')[0]
+            .split(/[._]/)
+            .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+          userName = `${namePart} (${email})`;
+        }
+        console.log(`[publishRota] Using identity for userName: ${userName}`);
+      } else {
+        console.log(`[publishRota] No user information available, using default: ${userName}`);
       }
       
       // Get all DRAFT rotas for this week only

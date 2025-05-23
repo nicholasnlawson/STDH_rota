@@ -151,6 +151,25 @@ export const listDirectorates = query({
   },
 });
 
+// List all wards from all directorates
+export const listWards = query({
+  args: {},
+  handler: async (ctx) => {
+    const directorates = await ctx.db.query("directorates").collect();
+    
+    // Extract all wards from all directorates and flatten them into a single array
+    const allWards = directorates.flatMap(directorate => 
+      directorate.wards.map(ward => ({
+        ...ward,
+        directorateName: directorate.name
+      }))
+    );
+    
+    // Sort wards by name
+    return allWards.sort((a, b) => a.name.localeCompare(b.name));
+  },
+});
+
 export const updateWard = mutation({
   args: {
     directorateName: v.string(),

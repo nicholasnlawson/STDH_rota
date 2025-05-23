@@ -25,6 +25,9 @@ import type * as pharmacists from "../pharmacists.js";
 import type * as requirements from "../requirements.js";
 import type * as rotas from "../rotas.js";
 import type * as scheduledTasks from "../scheduledTasks.js";
+import type * as technicianRequirements from "../technicianRequirements.js";
+import type * as technicianRotas from "../technicianRotas.js";
+import type * as technicians from "../technicians.js";
 
 /**
  * A utility for referencing Convex functions in your app's API.
@@ -47,6 +50,9 @@ declare const fullApi: ApiFromModules<{
   requirements: typeof requirements;
   rotas: typeof rotas;
   scheduledTasks: typeof scheduledTasks;
+  technicianRequirements: typeof technicianRequirements;
+  technicianRotas: typeof technicianRotas;
+  technicians: typeof technicians;
 }>;
 export declare const api: FilterApi<
   typeof fullApi,

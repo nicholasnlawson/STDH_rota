@@ -287,62 +287,144 @@ export function ClinicList() {
         </div>
       )}
       {showForm && !selectedClinic && (
-        <form
-          className="bg-gray-50 p-4 rounded shadow mb-4 flex flex-col gap-3 max-w-md"
-          onSubmit={async (e) => {
-            e.preventDefault();
-            const form = e.target as typeof e.target & {
-              name: { value: string };
-              dayOfWeek: { value: string };
-              startTime: { value: string };
-              endTime: { value: string };
-              coverageNote: { value: string };
-              isActive: { checked: boolean };
-              includeByDefaultInRota: { checked: boolean };
-            };
-            await addClinic({
-              name: form.name.value,
-              dayOfWeek: Number(form.dayOfWeek.value),
-              startTime: form.startTime.value,
-              endTime: form.endTime.value,
-              coverageNote: form.coverageNote.value,
-              isActive: form.isActive.checked,
-              includeByDefaultInRota: form.includeByDefaultInRota.checked,
-            });
-            setShowForm(false);
-          }}
-        >
-          <h3 className="font-semibold text-lg mb-2">Add Clinic</h3>
-          <label className="text-sm font-medium">Name
-            <input className="input-field mt-1" name="name" required />
-          </label>
-          <label className="text-sm font-medium">Day
-            <select className="input-field mt-1" name="dayOfWeek" required>
-              {DAYS.map((d, i) => (
-                <option key={i+1} value={i+1}>{d}</option>
-              ))}
-            </select>
-          </label>
-          <label className="text-sm font-medium">Start Time
-            <input className="input-field mt-1" type="time" name="startTime" required />
-          </label>
-          <label className="text-sm font-medium">End Time
-            <input className="input-field mt-1" type="time" name="endTime" required />
-          </label>
-          <label className="text-sm font-medium">Coverage Note
-            <input className="input-field mt-1" name="coverageNote" />
-          </label>
-          <label className="text-sm font-medium flex items-center gap-2">Active
-            <input type="checkbox" name="isActive" defaultChecked />
-          </label>
-          <label className="text-sm font-medium flex items-center gap-2">Include by Default in Rota
-            <input type="checkbox" name="includeByDefaultInRota" defaultChecked={false} />
-          </label>
-          <div className="flex gap-2 mt-2">
-            <button type="submit" className="bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700">Add</button>
-            <button type="button" className="bg-gray-300 text-gray-800 px-3 py-1 rounded hover:bg-gray-400" onClick={() => setShowForm(false)}>Cancel</button>
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-30">
+          <div className="bg-white rounded-lg shadow-lg w-full max-w-md p-6 relative">
+            <div className="flex justify-between items-center mb-4">
+              <h3 className="text-xl font-semibold">Add Clinic</h3>
+              <button
+                className="text-gray-400 hover:text-gray-600 text-2xl font-bold absolute top-2 right-4"
+                onClick={() => setShowForm(false)}
+                aria-label="Close"
+              >
+                ×
+              </button>
+            </div>
+            
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  const form = e.target as typeof e.target & {
+                    name: { value: string };
+                    dayOfWeek: { value: string };
+                    startTime: { value: string };
+                    endTime: { value: string };
+                    coverageNote: { value: string };
+                    isActive: { checked: boolean };
+                    includeByDefaultInRota: { checked: boolean };
+                  };
+                  
+                  await addClinic({
+                    name: form.name.value,
+                    dayOfWeek: Number(form.dayOfWeek.value),
+                    startTime: form.startTime.value,
+                    endTime: form.endTime.value,
+                    coverageNote: form.coverageNote.value,
+                    isActive: form.isActive.checked,
+                    includeByDefaultInRota: form.includeByDefaultInRota.checked,
+                    requiresWarfarinTraining: true, // Default for Warfarin clinics
+                    travelTimeBefore: 30, // Default travel time
+                    travelTimeAfter: 30, // Default travel time
+                    isRegular: false, // Default for non-regular clinics
+                  });
+                  
+                  alert("Clinic added successfully");
+                  setShowForm(false);
+                } catch (error) {
+                  console.error("Error adding clinic:", error);
+                  alert("Failed to add clinic");
+                }
+              }}
+              className="space-y-4"
+            >
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Name</label>
+                <input
+                  type="text"
+                  name="name"
+                  required
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Day</label>
+                <select
+                  name="dayOfWeek"
+                  required
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                >
+                  {DAYS.map((d, i) => (
+                    <option key={i+1} value={i+1}>{d}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Start Time</label>
+                <input
+                  type="time"
+                  name="startTime"
+                  required
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700">End Time</label>
+                <input
+                  type="time"
+                  name="endTime"
+                  required
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div>
+                <label className="block text-sm font-medium text-gray-700">Coverage Note</label>
+                <input
+                  type="text"
+                  name="coverageNote"
+                  className="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500"
+                />
+              </div>
+              
+              <div className="flex flex-col space-y-2">
+                <label className="flex items-center text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    name="isActive"
+                    defaultChecked
+                  />
+                  <span className="ml-2">Active</span>
+                </label>
+                <label className="flex items-center text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    name="includeByDefaultInRota"
+                  />
+                  <span className="ml-2">Include by Default in Rota</span>
+                </label>
+              </div>
+              
+              <div className="flex justify-end gap-2 mt-6">
+                <button
+                  type="button"
+                  className="bg-gray-200 text-gray-800 px-4 py-2 rounded font-medium hover:bg-gray-300"
+                  onClick={() => setShowForm(false)}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="bg-blue-500 text-white px-4 py-2 rounded font-medium hover:bg-blue-600"
+                >
+                  Add
+                </button>
+              </div>
+            </form>
           </div>
-        </form>
+        </div>
       )}
     </div>
   );

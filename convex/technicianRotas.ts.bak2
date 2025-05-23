@@ -1,0 +1,2204 @@
+import { mutation, query, internalMutation } from "./_generated/server";
+import { v } from "convex/values";
+import { internal } from "./_generated/api";
+import { Doc, Id } from "./_generated/dataModel";
+import { action } from "./_generated/server";
+
+// Helper function to shuffle array (for random selection)
+function shuffleArray<T>(array: T[]): T[] {
+  const newArray = [...array];
+  for (let i = newArray.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [newArray[i], newArray[j]] = [newArray[j], newArray[i]];
+  }
+  return newArray;
+}
+
+// Define the Assignment type for technician rotas
+interface TechnicianAssignment {
+  technicianId: Id<"technicians">;
+  type: "requirement" | "clinic" | "dispensary"; // Type of assignment
+  location: string; // Name of assignment (ward, dispensary, etc.)
+  startTime: string; // Start time (HH:MM format)
+  endTime: string; // End time (HH:MM format)
+  category?: string; // Assignment category
+}
+
+// Define the Conflict type for tracking conflicts
+interface Conflict {
+  type: string;
+  description: string;
+  severity: "warning" | "error";
+}
+
+// Debugging helper
+function terminalLog(...args: any[]) {
+  console.log("[TechnicianRotas]", ...args);
+  return undefined;
+}
+
+// Helper function to check if a technician is band 6 (with flexible matching)
+const isBand6 = (tech: { band?: string | null }) => {
+  // Check for various possible formats of Band 6
+  if (!tech.band) return false;
+  
+  const bandStr = String(tech.band).trim().toLowerCase();
+  return bandStr === 'band 6' || bandStr === 'band6' || bandStr === '6' || bandStr === 'six' || bandStr === 'b6';
+};
+
+// Main rota generation logic
+export const generateTechnicianRota = internalMutation({
+  args: {
+    date: v.string(),
+    technicianIds: v.array(v.id("technicians")),
+    includeWarfarinClinics: v.optional(v.boolean()),
+    ignoredUnavailableRules: v.optional(v.object({
+      technicianId: v.string(),
+      ruleIndices: v.array(v.number())
+    })),
+    selectedWeekdays: v.optional(v.array(v.string())),
+    workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+    additionalRoles: v.optional(v.array(v.string())), // Names of additional roles to include in rota
+  },
+  handler: async (ctx, args) => {
+    // Return type definition
+    type ReturnType = {
+      assignments: TechnicianAssignment[];
+      conflicts: Conflict[];
+      rotaId: Id<"technicianRotas">;
+    };
+    // Initialize variables
+    let assignments: TechnicianAssignment[] = [];
+    const conflicts: Conflict[] = [];
+    
+    // Fetch all active requirements directly for logging
+    const allActiveRequirements = await ctx.db.query("technicianRequirements")
+      .filter(q => q.eq(q.field("isActive"), true))
+      .collect();
+    
+    console.log(`[generateTechnicianRota] DETAILED LOG - Found ${allActiveRequirements.length} active requirements:`);
+    allActiveRequirements.forEach((req, idx) => {
+      console.log(`[generateTechnicianRota] Requirement #${idx + 1}: ${req.name} - Category: ${req.category} - Min Techs: ${req.minTechnicians} - Needs Training: ${req.requiresSpecialTraining ? req.trainingType || 'Yes' : 'No'} - Include by default: ${req.includeByDefaultInRota ? 'Yes' : 'No'}`);
+    });
+    
+    // Get the date and day of week
+    const date = new Date(args.date);
+    const dayOfWeek = date.getDay(); // 0 = Sunday, 1 = Monday, etc.
+    const dayLabel = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dayOfWeek];
+    
+    // Skip if the day is not selected
+    if (args.selectedWeekdays && !args.selectedWeekdays.includes(dayLabel)) {
+      console.log(`[generateTechnicianRota] Skipping ${dayLabel} as it's not selected`);
+      
+      // Create an empty rota record for this date
+      const rotaId = await ctx.db.insert("technicianRotas", {
+        date: args.date,
+        assignments: [],
+        conflicts: [],
+        includedWeekdays: args.selectedWeekdays || [],
+        staffIds: args.technicianIds,
+        status: "draft"
+      });
+      
+      return {
+        assignments: [],
+        conflicts: [],
+        rotaId
+      };
+    }
+    
+    console.log(`[generateTechnicianRota] Generating rota for ${args.date} (${dayLabel})`);
+    
+    // Get all technicians
+    const allTechnicians = await Promise.all(
+      args.technicianIds.map((id: Id<"technicians">) => ctx.db.get(id))
+    );
+    
+    // Filter out null technicians and update working days if provided
+    const technicians = allTechnicians.filter((t): t is Doc<"technicians"> => t !== null)
+      .map(tech => {
+        // If working days were provided in the configuration, use those
+        if (args.workingDays && args.workingDays[tech._id]) {
+          return { ...tech, workingDays: args.workingDays[tech._id] };
+        }
+        return tech;
+      });
+    
+    // Helper function to check if a technician is unavailable at a specific time
+    const isTechnicianNotAvailable = (
+      technician: Doc<"technicians">,
+      day: string,
+      startTime: string,
+      endTime: string
+    ): boolean => {
+      // Check if technician has working days and if this is one of them
+      if (args.workingDays && args.workingDays[technician._id]) {
+        if (!args.workingDays[technician._id].includes(day)) {
+          console.log(`[isTechnicianNotAvailable] Technician ${technician.name} is not scheduled to work on ${day}`);
+          return true; // Technician is not working on this day
+        }
+      } else if (technician.workingDays && technician.workingDays.length > 0) {
+        // Fallback to technician's working days if no workingDays parameter provided
+        if (!technician.workingDays.includes(day)) {
+          console.log(`[isTechnicianNotAvailable] Fallback: Technician ${technician.name} is not working on ${day}`);
+          return true; // Technician is not working on this day
+        }
+      }
+      
+      // Check unavailable rules
+      if (technician.notAvailableRules && technician.notAvailableRules.length > 0) {
+        // Find rules for this day
+        const rulesForDay = technician.notAvailableRules.filter(rule => 
+          rule.dayOfWeek === day || rule.dayOfWeek === "Any"
+        );
+        
+        // Check each rule
+        for (let i = 0; i < rulesForDay.length; i++) {
+          const rule = rulesForDay[i];
+          
+          // Skip this rule if it's being ignored
+          if (args.ignoredUnavailableRules && 
+              args.ignoredUnavailableRules.technicianId === technician._id &&
+              args.ignoredUnavailableRules.ruleIndices.includes(i)) {
+            continue;
+          }
+          
+          // Check if times overlap
+          if (doTimesOverlap(rule.startTime, rule.endTime, startTime, endTime)) {
+            return true;
+          }
+        }
+      }
+      
+      return false;
+    };
+    
+    // Helper: check if two time periods overlap
+    const doTimesOverlap = (
+      start1: string,
+      end1: string,
+      start2: string,
+      end2: string
+    ): boolean => {
+      return start1 < end2 && start2 < end1;
+    };
+    
+    // Get all technician requirements
+    const requirements = await ctx.db.query("technicianRequirements")
+      .filter(q => q.eq(q.field("isActive"), true))
+      .collect();
+    
+    console.log(`[generateTechnicianRota] Found ${requirements.length} active requirements`);
+    
+    // Log detailed information about each requirement
+    console.log(`[generateTechnicianRota] Active requirements details:`);
+    requirements.forEach((req, index) => {
+      console.log(`[generateTechnicianRota] Requirement #${index + 1}:`, {
+        name: req.name,
+        category: req.category,
+        minTechnicians: req.minTechnicians,
+        idealTechnicians: req.idealTechnicians,
+        requiresSpecialTraining: req.requiresSpecialTraining,
+        trainingType: req.trainingType || 'None',
+        difficulty: req.difficulty,
+        includeByDefault: req.includeByDefaultInRota
+      });
+    });
+    
+    // Log active requirements for debugging
+    console.log(`[generateTechnicianRota] Active requirements details:`);
+    requirements.forEach((req, index) => {
+      console.log(`[generateTechnicianRota] Requirement #${index + 1}:`, {
+        name: req.name,
+        category: req.category,
+        minTechnicians: req.minTechnicians,
+        idealTechnicians: req.idealTechnicians,
+        requiresSpecialTraining: req.requiresSpecialTraining,
+        trainingType: req.trainingType || 'None',
+        difficulty: req.difficulty,
+        includeByDefault: req.includeByDefaultInRota
+      });
+    });
+    
+    // Filter requirements based on their category and user selections
+    // 1. Always include active wards (category === 'Ward')
+    // 2. Only include other types (dispensaries, clinics) if they're in additionalRoles
+    const wardRequirements = requirements.filter(req => req.category === 'Ward');
+    
+    // Get additional roles from args (if provided)
+    const additionalRoles = args.additionalRoles || [];
+    console.log(`[generateTechnicianRota] Additional roles selected for rota:`, additionalRoles);
+    
+    // Log the available additional roles from our arguments for debugging
+    console.log(`[generateTechnicianRota] Additional roles requested:`, additionalRoles || []);
+    
+    // List all available categories and requirements for debugging
+    const categories = [...new Set(requirements.map(req => req.category))];
+    console.log(`[generateTechnicianRota] Available requirement categories:`, categories);
+    
+    // For each category, list available requirements
+    categories.forEach(category => {
+      const reqs = requirements.filter(r => r.category === category).map(r => r.name);
+      console.log(`[generateTechnicianRota] Requirements in category '${category}':`, reqs);
+    });
+    
+    // Get the day of week (0 = Sunday, 1 = Monday, etc.)
+    const currentDate = new Date(args.date);
+    const currentDayOfWeek = currentDate.getDay();
+    const dayNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const currentDayName = dayNames[currentDayOfWeek];
+    
+    console.log(`[generateTechnicianRota] Processing rota for ${currentDayName} (${args.date})`);
+    
+    // Include additional roles (non-ward requirements) only if specifically selected
+    const additionalRequirements = requirements.filter(req => {
+      // All wards are always included regardless of day
+      if (req.category === 'Ward') {
+        return false; // We filter out wards here, they're added separately below
+      }
+      
+      // For non-ward requirements, only include if explicitly selected
+      const isSelected = additionalRoles && additionalRoles.includes(req.name);
+      
+      if (!isSelected) {
+        return false;
+      }
+      
+      console.log(`[generateTechnicianRota] Including role ${req.name} for ${args.date}`);
+      return true;
+    });
+    
+    // Check if any requested additional roles don't exist in the database
+    if (additionalRoles && additionalRoles.length > 0) {
+      const existingRoleNames = requirements.filter(r => r.category !== 'Ward').map(r => r.name);
+      const missingRoles = additionalRoles.filter(role => !existingRoleNames.includes(role));
+      
+      if (missingRoles.length > 0) {
+        console.log(`[generateTechnicianRota] WARNING: The following requested roles don't exist in the database:`, missingRoles);
+      }
+    }
+    
+    // Combine ward requirements with selected additional roles
+    const selectedRequirements = [...wardRequirements, ...additionalRequirements];
+    
+    console.log(`[generateTechnicianRota] Using ${selectedRequirements.length} requirements for rota generation:`);
+    console.log(`- ${wardRequirements.length} wards (automatically included)`);
+    console.log(`- ${additionalRequirements.length} additional roles (explicitly selected)`);
+    selectedRequirements.forEach((req, index) => {
+      console.log(`[generateTechnicianRota] Selected requirement #${index + 1}:`, {
+        name: req.name,
+        category: req.category,
+        minTechnicians: req.minTechnicians
+      });
+    });
+    
+    // Sort requirements by priority:
+    // 1. Specialized training needs first
+    // 2. Then by difficulty level (highest first)
+    // 3. Then by minimum technicians needed (highest first)
+    const sortedRequirements = [...selectedRequirements].sort((a, b) => {
+      // Special training needs first
+      if (a.requiresSpecialTraining && !b.requiresSpecialTraining) return -1;
+      if (!a.requiresSpecialTraining && b.requiresSpecialTraining) return 1;
+      
+      // Then by difficulty
+      if (a.difficulty > b.difficulty) return -1;
+      if (a.difficulty < b.difficulty) return 1;
+      
+      // Then by minimum technicians needed
+      return b.minTechnicians - a.minTechnicians;
+    });
+    
+    console.log(`[generateTechnicianRota] Requirements after sorting by priority:`);
+    sortedRequirements.forEach((req, index) => {
+      console.log(`[generateTechnicianRota] Prioritized requirement #${index + 1}:`, {
+        name: req.name,
+        category: req.category,
+        requiresSpecialTraining: req.requiresSpecialTraining,
+        difficulty: req.difficulty,
+        minTechnicians: req.minTechnicians
+      });
+    });
+    
+    // Get all clinics for this day of week
+    let warfarinClinics: Doc<"clinics">[] = [];
+    let regularClinics: Doc<"clinics">[] = [];
+    
+    // Get all active clinics for this day
+    const allClinics = await ctx.db.query("clinics")
+      .filter(q => 
+        q.eq(q.field("isActive"), true) &&
+        q.eq(q.field("dayOfWeek"), dayOfWeek)
+      )
+      .collect();
+    
+    // LOGGING: Log all clinics retrieved for this day
+    console.log(`[generateTechnicianRota] Retrieved ${allClinics.length} total clinics for day ${dayOfWeek} (${dayLabel})`);
+    allClinics.forEach(clinic => {
+      console.log(`[generateTechnicianRota] CLINIC DATA: ${clinic.name}`, {
+        id: clinic._id,
+        requiresWarfarinTraining: clinic.requiresWarfarinTraining,
+        dayOfWeek: clinic.dayOfWeek,
+        startTime: clinic.startTime,
+        endTime: clinic.endTime,
+        isActive: clinic.isActive
+      });
+    });
+    
+    // Separate into warfarin and regular clinics
+    warfarinClinics = allClinics.filter(clinic => clinic.requiresWarfarinTraining === true);
+    regularClinics = allClinics.filter(clinic => clinic.requiresWarfarinTraining !== true);
+    
+    console.log(`[generateTechnicianRota] Found ${warfarinClinics.length} active warfarin clinics for ${dayLabel}:`);
+    warfarinClinics.forEach(clinic => {
+      console.log(`[generateTechnicianRota] - Warfarin clinic: ${clinic.name} at ${clinic.startTime}-${clinic.endTime}`);
+    });
+    
+    console.log(`[generateTechnicianRota] Found ${regularClinics.length} active regular clinics for ${dayLabel}:`);
+    regularClinics.forEach(clinic => {
+      console.log(`[generateTechnicianRota] - Regular clinic: ${clinic.name} at ${clinic.startTime}-${clinic.endTime}`);
+    });
+    
+    // Create a working copy of technicians to track assignments
+    const availableTechnicians = [...technicians].filter(t => {
+      // Check if technician is not unavailable due to rules
+      const isAvailableByRules = !isTechnicianNotAvailable(t, dayLabel, "09:00", "17:00");
+      
+      // Check if this day is in the technician's working days if workingDays is provided
+      let isWorkingDay = true;
+      if (args.workingDays && args.workingDays[t._id]) {
+        isWorkingDay = args.workingDays[t._id].includes(dayLabel);
+        console.log(`[generateTechnicianRota] Technician ${t.name} working days: ${args.workingDays[t._id].join(', ')}`);
+        console.log(`[generateTechnicianRota] Is ${t.name} working on ${dayLabel}? ${isWorkingDay}`);
+      }
+      
+      return isAvailableByRules && isWorkingDay;
+    });
+    
+    console.log(`[generateTechnicianRota] ${availableTechnicians.length} technicians available on ${dayLabel}`);
+    
+    // DIAGNOSTIC: Log all technicians from the database with their complete data
+    console.log(`[DIAGNOSTIC] ===== TECHNICIAN DATA DUMP =====`);
+    console.log(`[DIAGNOSTIC] Total technicians from database: ${technicians.length}`);
+    technicians.forEach((tech, index) => {
+      console.log(`[DIAGNOSTIC] Technician #${index + 1}: ${tech.name}`, {
+        _id: tech._id,
+        band: tech.band,
+        isAdmin: tech.isAdmin,
+        isAccuracyChecker: tech.isAccuracyChecker,
+        isMedsRecTrained: tech.isMedsRecTrained,
+        isWarfarinTrained: tech.isWarfarinTrained,
+        workingDays: tech.workingDays,
+        primaryWards: tech.primaryWards,
+        specialistTraining: tech.specialistTraining || [],
+        allProperties: Object.keys(tech)
+      });
+    });
+    console.log(`[DIAGNOSTIC] ===== END OF TECHNICIAN DATA DUMP =====`);
+    
+    // Log the available technicians with more details
+    console.log(`[DIAGNOSTIC] ===== AVAILABLE TECHNICIANS FOR ${dayLabel} =====`);
+    availableTechnicians.forEach((tech, index) => {
+      console.log(`[DIAGNOSTIC] Available technician #${index + 1}: ${tech.name}`, {
+        _id: tech._id,
+        band: tech.band,
+        bandType: typeof tech.band,
+        bandExists: 'band' in tech,
+        isAccuracyChecker: tech.isAccuracyChecker,
+        isMedsRecTrained: tech.isMedsRecTrained,
+        isWarfarinTrained: tech.isWarfarinTrained,
+        primaryWards: tech.primaryWards,
+        specialistTraining: tech.specialistTraining || []
+      });
+    });
+    console.log(`[DIAGNOSTIC] ===== END OF AVAILABLE TECHNICIANS =====`);
+    
+    console.log(`[generateTechnicianRota] Requirements to fill:`, sortedRequirements.map(r => r.name));
+    console.log(`[generateTechnicianRota] Assigning technicians to requirements dynamically`);
+    
+    // Add a counter to track assignment attempts
+    let assignmentAttempts = 0;
+    
+    // Map requirements by name for easier access
+    const requirementsByName = new Map<string, Doc<"technicianRequirements">>(); 
+    sortedRequirements.forEach(req => {
+      requirementsByName.set(req.name, req);
+    });
+    
+    // Track which technicians are assigned to which requirements
+    const assignedTechnicians = new Set<Id<"technicians">>(); 
+    const requirementAssignments = new Map<string, Id<"technicians">[]>();
+    
+    // PASS 1: First assign to Warfarin clinics, then regular clinics, then assign full-time technicians to primary wards
+    console.log(`[generateTechnicianRota] PASS 1: Starting assignments with priority for Warfarin clinics, regular clinics, then full-time technicians`);
+    
+    // PART 1A: First handle Warfarin clinics if needed (highest priority)
+    console.log(`[generateTechnicianRota] Should include warfarin clinics? ${args.includeWarfarinClinics}, Number of warfarin clinics: ${warfarinClinics.length}`);
+    if (args.includeWarfarinClinics && warfarinClinics.length > 0) {
+      console.log(`[generateTechnicianRota] PASS 1A: Assigning technicians to ${warfarinClinics.length} Warfarin clinics (highest priority)`);
+      
+      for (const clinic of warfarinClinics) {
+        console.log(`[generateTechnicianRota] Processing warfarin clinic: ${clinic.name} at ${clinic.startTime}-${clinic.endTime}`);
+        
+        // Find technicians with warfarin training
+        const warfarinTechnicians = availableTechnicians.filter(t => 
+          t.specialistTraining && Array.isArray(t.specialistTraining) && t.specialistTraining.includes("Warfarin")
+        );
+        
+        if (warfarinTechnicians.length === 0) {
+          console.log(`[generateTechnicianRota] No technicians with Warfarin training available`);
+          conflicts.push({
+            type: "clinic",
+            description: `No technicians with Warfarin training available for clinic ${clinic.name}`,
+            severity: "error"
+          });
+          
+          // Add clinic to assignments without a technician
+          assignments.push({
+            // Cannot use null technicianId - violates schema//, // Will be handled as unassigned in UI
+            type: "clinic",
+            location: clinic.name,
+            startTime: clinic.startTime,
+            endTime: clinic.endTime,
+            category: "Clinic"
+          });
+          
+          console.log(`[generateTechnicianRota] Added empty assignment for warfarin clinic: ${clinic.name}`);
+          continue;
+        }
+        
+        // Find available warfarin technicians for this clinic time
+        const availableWarfarinTechs = warfarinTechnicians.filter(t => 
+          !isTechnicianNotAvailable(t, dayLabel, clinic.startTime, clinic.endTime)
+        );
+        
+        if (availableWarfarinTechs.length === 0) {
+          console.log(`[generateTechnicianRota] No available Warfarin-trained technicians for clinic ${clinic.name}`);
+          conflicts.push({
+            type: "clinic",
+            description: `No available Warfarin-trained technicians for clinic ${clinic.name}`,
+            severity: "warning"
+          });
+          
+          // Add clinic to assignments without a technician
+          assignments.push({
+            // Cannot use null technicianId - violates schema//, // Will be handled as unassigned in UI
+            type: "clinic",
+            location: clinic.name,
+            startTime: clinic.startTime,
+            endTime: clinic.endTime,
+            category: "Clinic"
+          });
+          
+          console.log(`[generateTechnicianRota] Added empty assignment for warfarin clinic: ${clinic.name}`);
+          continue;
+        }
+        
+        // Even if technician is assigned elsewhere, prioritize them for Warfarin clinic
+        // by selecting one (preferably not yet assigned, but will reassign if necessary)
+        let selectedTech = availableWarfarinTechs.find(t => !assignedTechnicians.has(t._id));
+        
+        // If no unassigned warfarin techs, pull one from their current assignment
+        if (!selectedTech && availableWarfarinTechs.length > 0) {
+          selectedTech = availableWarfarinTechs[0];
+          console.log(`[generateTechnicianRota] PRIORITY OVERRIDE: Moving ${selectedTech.name} from current assignment to Warfarin clinic ${clinic.name}`);
+          
+          // Remove previous assignment if there was one
+          const previousAssignmentIndex = assignments.findIndex(a => a.technicianId === selectedTech!._id);
+          if (previousAssignmentIndex >= 0) {
+            const prevAssignment = assignments[previousAssignmentIndex];
+            console.log(`[generateTechnicianRota] Removing previous assignment: ${selectedTech!.name} from ${prevAssignment.location}`);
+            
+            // Remove from assignments array
+            assignments.splice(previousAssignmentIndex, 1);
+            
+            // Update the requirement assignments tracking
+            const reqAssignments = requirementAssignments.get(prevAssignment.location) || [];
+            const techIndex = reqAssignments.findIndex(id => id === selectedTech!._id);
+            if (techIndex >= 0) {
+              reqAssignments.splice(techIndex, 1);
+              requirementAssignments.set(prevAssignment.location, reqAssignments);
+            }
+          }
+        }
+        
+        if (selectedTech) {
+          console.log(`[generateTechnicianRota] PASS 1A: Assigning ${selectedTech.name} to Warfarin clinic ${clinic.name}`);
+          
+          assignments.push({
+            technicianId: selectedTech._id,
+            type: "clinic",
+            location: clinic.name,
+            startTime: clinic.startTime,
+            endTime: clinic.endTime,
+            category: "Clinic"
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(selectedTech._id);
+        }
+      }
+      
+      // Log unassigned technicians after Warfarin clinic assignments
+      const unassignedAfterWarfarin = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+      console.log(`[generateTechnicianRota] PASS 1A COMPLETE: ${unassignedAfterWarfarin.length} technicians are still unassigned after Warfarin clinic assignments:`);
+      unassignedAfterWarfarin.forEach(tech => {
+        const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+        console.log(`- ${tech.name} (${techWorkingDays.length} days/week)`);
+      });
+    }
+    
+    // PART 1B: Next handle regular clinics
+    console.log(`[generateTechnicianRota] PASS 1B: Adding ${regularClinics.length} regular clinics to the rota`);
+    
+    for (const clinic of regularClinics) {
+      console.log(`[generateTechnicianRota] Processing regular clinic: ${clinic.name} at ${clinic.startTime}-${clinic.endTime}`);
+      
+      // For regular clinics, we need to handle them without adding a null technician ID
+      // Instead, we'll add a conflict to make them visible in the UI
+      conflicts.push({
+        type: "clinic_unassigned",
+        description: `Clinic ${clinic.name} at ${clinic.startTime}-${clinic.endTime} has no assigned technician`,
+        severity: "warning"
+      });
+      console.log(`[generateTechnicianRota] Added conflict for unassigned clinic: ${clinic.name}`);
+      
+      console.log(`[generateTechnicianRota] Added regular clinic to rota: ${clinic.name}`);
+    }
+    
+    // PART 1C: Assign accuracy checking technicians to dispensary requirements
+    console.log(`[generateTechnicianRota] PASS 1C: Assigning accuracy checking technicians to dispensary requirements`);
+    
+    // Get all dispensary requirements
+    const dispensaryRequirements = requirements.filter(req => req.category === 'Dispensary');
+    console.log(`[generateTechnicianRota] Found ${dispensaryRequirements.length} dispensary requirements`);
+    
+    if (dispensaryRequirements.length > 0) {
+      // Find all accuracy checking technicians
+      const accuracyCheckers = availableTechnicians.filter(t => 
+        t.isAccuracyChecker && !assignedTechnicians.has(t._id)
+      );
+      
+      console.log(`[generateTechnicianRota] Found ${accuracyCheckers.length} available accuracy checking technicians`);
+      
+      // Assign accuracy checkers to dispensaries
+      for (const dispensary of dispensaryRequirements) {
+        // Check if we need more technicians for this dispensary
+        const currentAssignments = requirementAssignments.get(dispensary.name) || [];
+        const techniciansNeeded = dispensary.minTechnicians - currentAssignments.length;
+        
+        if (techniciansNeeded <= 0) {
+          console.log(`[generateTechnicianRota] PASS 1B: Dispensary ${dispensary.name} already has enough technicians (${currentAssignments.length}/${dispensary.minTechnicians})`);
+          continue;
+        }
+        
+        console.log(`[generateTechnicianRota] PASS 1B: Need ${techniciansNeeded} accuracy checkers for dispensary ${dispensary.name}`);
+        
+        // Try to assign accuracy checkers to this dispensary
+        let assignedCount = 0;
+        for (const checker of accuracyCheckers) {
+          // Skip if already assigned
+          if (assignedTechnicians.has(checker._id)) {
+            continue;
+          }
+          
+          // Get working days for logging
+          const techWorkingDays = (args.workingDays && args.workingDays[checker._id]) || checker.workingDays || [];
+          
+          console.log(`[generateTechnicianRota] PASS 1B: Assigning accuracy checker ${checker.name} (${techWorkingDays.length} days/week) to dispensary ${dispensary.name}`);
+          
+          // Create the assignment
+          assignments.push({
+            technicianId: checker._id,
+            type: "requirement",
+            location: dispensary.name,
+            startTime: "09:00",
+            endTime: "17:00",
+            category: "Dispensary"
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(checker._id);
+          const updatedAssignments = requirementAssignments.get(dispensary.name) || [];
+          updatedAssignments.push(checker._id);
+          requirementAssignments.set(dispensary.name, updatedAssignments);
+          
+          assignedCount++;
+          
+          // Break if we've assigned enough technicians
+          if (assignedCount >= techniciansNeeded) {
+            break;
+          }
+        }
+        
+        // Log warning if we couldn't assign enough accuracy checkers
+        if (assignedCount < techniciansNeeded) {
+          console.log(`[generateTechnicianRota] PASS 1B: WARNING - Not enough accuracy checkers for dispensary ${dispensary.name}, assigned ${currentAssignments.length + assignedCount}/${dispensary.minTechnicians}`);
+          
+          conflicts.push({
+            type: "requirement",
+            description: `Not enough accuracy checkers for dispensary ${dispensary.name}, assigned ${currentAssignments.length + assignedCount}/${dispensary.minTechnicians}`,
+            severity: "warning"
+          });
+        }
+      }
+      
+      // Log unassigned technicians after dispensary assignments
+      const unassignedAfterDispensary = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+      console.log(`[generateTechnicianRota] PASS 1C COMPLETE: ${unassignedAfterDispensary.length} technicians are still unassigned:`);
+      unassignedAfterDispensary.forEach(tech => {
+        const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+        console.log(`- ${tech.name} (${techWorkingDays.length} days/week)`);
+      });
+    }
+    
+    // PART 1C: Assign technicians to their primary wards with priority for full-time technicians
+    console.log(`[generateTechnicianRota] PASS 1C: Assigning technicians to primary wards with priority for full-time technicians`);
+    
+    // Check if technicians have primary wards
+    const techniciansWithPrimaryWards = availableTechnicians.filter(t => 
+      t.primaryWards && Array.isArray(t.primaryWards) && t.primaryWards.length > 0
+    );
+    
+    console.log(`[generateTechnicianRota] ${techniciansWithPrimaryWards.length} out of ${availableTechnicians.length} technicians have primary wards defined`);
+    
+    // Identify full-time technicians (working 5+ days per week)
+    const fullTimeTechnicians = techniciansWithPrimaryWards.filter(t => {
+      // Get working days either from args or from technician record
+      const techWorkingDays = (args.workingDays && args.workingDays[t._id]) || t.workingDays || [];
+      return techWorkingDays.length >= 5;
+    });
+    
+    const partTimeTechnicians = techniciansWithPrimaryWards.filter(t => {
+      // Get working days either from args or from technician record
+      const techWorkingDays = (args.workingDays && args.workingDays[t._id]) || t.workingDays || [];
+      return techWorkingDays.length < 5;
+    });
+    
+    console.log(`[generateTechnicianRota] ${fullTimeTechnicians.length} full-time technicians and ${partTimeTechnicians.length} part-time technicians with primary wards`);
+    
+    // Log primary ward information for full-time technicians
+    fullTimeTechnicians.forEach(tech => {
+      const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+      console.log(`[generateTechnicianRota] Full-time technician ${tech.name} (${techWorkingDays.length} days) has primary wards:`, tech.primaryWards);
+    });
+    
+    // Log primary ward information for part-time technicians
+    partTimeTechnicians.forEach(tech => {
+      const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+      console.log(`[generateTechnicianRota] Part-time technician ${tech.name} (${techWorkingDays.length} days) has primary wards:`, tech.primaryWards);
+    });
+    
+    // Check if requirements exist
+    const existingRequirementNames = sortedRequirements.map(r => r.name);
+    console.log(`[generateTechnicianRota] Available requirements for assignment:`, existingRequirementNames);
+    
+    // Prioritize full-time technicians first
+    const prioritizedTechnicians = [...fullTimeTechnicians, ...partTimeTechnicians];
+    
+    for (const technician of prioritizedTechnicians) {
+      // Skip if already assigned (e.g., to a Warfarin clinic or dispensary)
+      if (assignedTechnicians.has(technician._id)) {
+        console.log(`[generateTechnicianRota] PASS 1C: Skipping ${technician.name} - already assigned`);
+        continue;
+      }
+      
+      // Check each primary ward
+      for (const primaryWard of technician.primaryWards) {
+        // Skip if this requirement doesn't exist or isn't active
+        if (!requirementsByName.has(primaryWard)) {
+          continue;
+        }
+        
+        const requirement = requirementsByName.get(primaryWard)!;
+        
+        // Check if technician meets any special training requirements
+        if (requirement.requiresSpecialTraining && requirement.trainingType) {
+          // Skip if technician doesn't have required training
+          let hasRequiredTraining = false;
+          
+          if (requirement.trainingType === "AccuracyChecker") {
+            hasRequiredTraining = technician.isAccuracyChecker || false; 
+          } else if (requirement.trainingType === "MedsRecTrained") {
+            hasRequiredTraining = technician.isMedsRecTrained || false;
+          } else if (technician.specialistTraining && requirement.trainingType) {
+            hasRequiredTraining = technician.specialistTraining.includes(requirement.trainingType);
+          }
+          
+          if (!hasRequiredTraining) {
+            console.log(`[generateTechnicianRota] PASS 1C: Technician ${technician.name} lacks required training ${requirement.trainingType} for primary ward ${primaryWard}`);
+            continue;
+          }
+        }
+        
+        // Check if we've already assigned the needed number of technicians
+        const currentAssignments = requirementAssignments.get(primaryWard) || [];
+        if (currentAssignments.length >= requirement.minTechnicians) {
+          console.log(`[generateTechnicianRota] PASS 1C: Requirement ${primaryWard} already has minimum technicians assigned (${currentAssignments.length}/${requirement.minTechnicians})`);
+          continue;
+        }
+        
+        // Get working days for logging
+        const techWorkingDays = (args.workingDays && args.workingDays[technician._id]) || technician.workingDays || [];
+        
+        // Assign the technician to their primary ward
+        console.log(`[generateTechnicianRota] PASS 1C: Assigning ${technician.name} (${techWorkingDays.length} days/week) to primary ward ${primaryWard}`);
+        
+        assignments.push({
+          technicianId: technician._id,
+          type: "requirement",
+          location: primaryWard,
+          startTime: "09:00",
+          endTime: "17:00",
+          category: requirement.category
+        });
+        
+        // Update tracking
+        assignedTechnicians.add(technician._id);
+        const updatedAssignments = requirementAssignments.get(primaryWard) || [];
+        updatedAssignments.push(technician._id);
+        requirementAssignments.set(primaryWard, updatedAssignments);
+        
+        // Break after first primary ward assignment
+        break;
+      }
+    }
+    
+    // Log unassigned technicians after PASS 1 (both Warfarin and primary wards)
+    const unassignedAfterPass1 = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+    console.log(`[generateTechnicianRota] PASS 1 COMPLETE: ${unassignedAfterPass1.length} technicians are still unassigned:`);
+    unassignedAfterPass1.forEach(tech => {
+      const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+      console.log(`- ${tech.name} (${techWorkingDays.length} days/week)`);
+    });
+    
+    // PASS 2A: Reserve band 6 technicians for Management Time if all wards can be covered
+    console.log(`[generateTechnicianRota] PASS 2A: Checking if band 6 technicians can be reserved for Management Time`);
+    
+    // Get all unassigned technicians
+    const unassignedTechnicians = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+    console.log(`[generateTechnicianRota] ${unassignedTechnicians.length} technicians still unassigned:`, 
+      unassignedTechnicians.map(t => t.name));
+    
+    // Log all technician bands for debugging
+    console.log(`[DIAGNOSTIC] All technician bands:`);
+    unassignedTechnicians.forEach(tech => {
+      console.log(`[DIAGNOSTIC] ${tech.name}: band = '${tech.band}', isBand6 = ${isBand6(tech)}`);
+    });
+    
+    // Identify band 6 technicians among unassigned
+    const band6Technicians = unassignedTechnicians.filter(isBand6);
+    console.log(`[generateTechnicianRota] Found ${band6Technicians.length} unassigned band 6 technicians:`, band6Technicians.map(t => t.name));
+    
+    // Other technicians (not band 6)
+    const nonBand6Technicians = unassignedTechnicians.filter(t => !isBand6(t));
+    console.log(`[generateTechnicianRota] Found ${nonBand6Technicians.length} unassigned non-band 6 technicians:`, nonBand6Technicians.map(t => t.name));
+    
+    // Check if we can cover all minimum requirements without using band 6 technicians
+    let canCoverWithoutBand6 = true;
+    let requirementsNeedingTechnicians = 0;
+    let totalTechniciansNeeded = 0;
+    
+    // Calculate how many technicians we need for minimum coverage
+    for (const requirement of sortedRequirements) {
+      const currentAssignments = requirementAssignments.get(requirement.name) || [];
+      const techniciansNeeded = requirement.minTechnicians - currentAssignments.length;
+      
+      if (techniciansNeeded > 0) {
+        requirementsNeedingTechnicians++;
+        totalTechniciansNeeded += techniciansNeeded;
+        console.log(`[generateTechnicianRota] Requirement ${requirement.name} needs ${techniciansNeeded} more technicians (has ${currentAssignments.length}/${requirement.minTechnicians})`);
+      }
+    }
+    
+    console.log(`[generateTechnicianRota] PASS 2A: Need ${totalTechniciansNeeded} more technicians for minimum coverage across ${requirementsNeedingTechnicians} requirements`);
+    
+    // Check if we have enough non-band 6 technicians to cover minimum requirements
+    if (nonBand6Technicians.length >= totalTechniciansNeeded) {
+      console.log(`[generateTechnicianRota] PASS 2A: Can reserve band 6 technicians for Management Time (have ${nonBand6Technicians.length} non-band 6 technicians available for ${totalTechniciansNeeded} needed positions)`);
+      
+      // Reserve all band 6 technicians for Management Time
+      const reservedBand6TechIds = new Set<Id<"technicians">>();
+      band6Technicians.forEach(tech => {
+        reservedBand6TechIds.add(tech._id);
+        console.log(`[generateTechnicianRota] PASS 2A: Reserving band 6 technician ${tech.name} for Management Time`);
+      });
+      
+      // PASS 2B: Fill minimum requirements with non-band 6 technicians
+      console.log(`[generateTechnicianRota] PASS 2B: Ensuring minimum technicians per requirement (using non-band 6 technicians)`);
+      
+      // Log which requirements still need technicians
+      console.log(`[generateTechnicianRota] Requirements needing assignment:`);
+      for (const requirement of sortedRequirements) {
+        const currentAssignments = requirementAssignments.get(requirement.name) || [];
+        const needsMore = requirement.minTechnicians > currentAssignments.length;
+        console.log(`[generateTechnicianRota] ${requirement.name}: has ${currentAssignments.length}/${requirement.minTechnicians} technicians${needsMore ? ' - NEEDS MORE' : ''}`);
+      }
+      
+      // Assign non-band 6 technicians to requirements that need more
+      for (const requirement of sortedRequirements) {
+        const currentAssignments = requirementAssignments.get(requirement.name) || [];
+        const techniciansNeeded = requirement.minTechnicians - currentAssignments.length;
+        
+        if (techniciansNeeded <= 0) {
+          console.log(`[generateTechnicianRota] PASS 2B: Requirement ${requirement.name} already has enough technicians (${currentAssignments.length}/${requirement.minTechnicians})`);
+          continue;
+        }
+        
+        console.log(`[generateTechnicianRota] PASS 2B: Need ${techniciansNeeded} more technicians for ${requirement.name}`);
+        
+        // Get eligible non-band 6 technicians
+        const eligibleTechnicians = availableTechnicians.filter(t => {
+          // Skip if already assigned or reserved band 6
+          if (assignedTechnicians.has(t._id) || reservedBand6TechIds.has(t._id)) {
+            return false;
+          }
+          
+          // Check special training requirements
+          if (requirement.requiresSpecialTraining && requirement.trainingType) {
+            if (requirement.trainingType === "AccuracyChecker") {
+              return t.isAccuracyChecker || false;
+            } else if (requirement.trainingType === "MedsRecTrained") {
+              return t.isMedsRecTrained || false;
+            } else if (t.specialistTraining && requirement.trainingType) {
+              return t.specialistTraining.includes(requirement.trainingType);
+            }
+            return false;
+          }
+          
+          return true;
+        });
+        
+        console.log(`[generateTechnicianRota] PASS 2B: Found ${eligibleTechnicians.length} eligible non-band 6 technicians for ${requirement.name}`);
+        
+        // If no eligible technicians, log a warning
+        if (eligibleTechnicians.length === 0) {
+          console.log(`[generateTechnicianRota] PASS 2B: WARNING - No eligible non-band 6 technicians available for ${requirement.name}!`);
+          continue;
+        }
+        
+        // Shuffle to randomize assignments
+        const shuffledTechnicians = shuffleArray(eligibleTechnicians);
+        
+        // Assign up to the number needed
+        let assignedCount = 0;
+        for (const technician of shuffledTechnicians) {
+          if (assignedCount >= techniciansNeeded) {
+            break;
+          }
+          
+          // Skip if already assigned or is a reserved band 6
+          if (assignedTechnicians.has(technician._id) || reservedBand6TechIds.has(technician._id)) {
+            continue;
+          }
+          
+          console.log(`[generateTechnicianRota] PASS 2B: Assigning ${technician.name} to ${requirement.name}`);
+          
+          assignments.push({
+            technicianId: technician._id,
+            type: "requirement",
+            location: requirement.name,
+            startTime: "09:00",
+            endTime: "17:00",
+            category: requirement.category
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(technician._id);
+          const updatedAssignments = requirementAssignments.get(requirement.name) || [];
+          updatedAssignments.push(technician._id);
+          requirementAssignments.set(requirement.name, updatedAssignments);
+          
+          assignedCount++;
+        }
+        
+        // Record conflict if we couldn't assign enough technicians
+        if (assignedCount < techniciansNeeded) {
+          console.log(`[generateTechnicianRota] PASS 2B: WARNING - Not enough non-band 6 technicians for ${requirement.name}, assigned ${currentAssignments.length + assignedCount}/${requirement.minTechnicians}`);
+          
+          conflicts.push({
+            type: "requirement",
+            description: `Not enough non-band 6 technicians for ${requirement.name}, assigned ${currentAssignments.length + assignedCount}/${requirement.minTechnicians}`,
+            severity: "warning"
+          });
+        }
+      }
+      
+      // PASS 2C: Assign band 6 technicians to Management Time
+      console.log(`[generateTechnicianRota] PASS 2C: Assigning band 6 technicians to Management Time`);
+      
+      // Log all the reserved band 6 technicians
+      console.log(`[DIAGNOSTIC] Reserved band 6 technicians: ${band6Technicians.length}`);
+      band6Technicians.forEach(tech => {
+        console.log(`[DIAGNOSTIC] Reserved band 6: ${tech.name}, band = '${tech.band}', isBand6 = ${isBand6(tech)}`);
+      });
+      
+      // Check if all wards have minimum coverage
+      const allWardsHaveMinimumCoverage = sortedRequirements
+        .filter(req => req.category === 'Ward')
+        .every(req => {
+          const currentAssignments = requirementAssignments.get(req.name) || [];
+          return currentAssignments.length >= req.minTechnicians;
+        });
+      
+      if (allWardsHaveMinimumCoverage) {
+        console.log(`[generateTechnicianRota] All wards have minimum coverage, assigning band 6 technicians to Management Time`);
+        
+        // Assign reserved band 6 technicians to Management Time
+        for (const technician of band6Technicians) {
+          // Skip if already assigned (shouldn't happen)
+          if (assignedTechnicians.has(technician._id)) {
+            continue;
+          }
+          
+          // Get working days for logging
+          const techWorkingDays = (args.workingDays && args.workingDays[technician._id]) || technician.workingDays || [];
+          
+          console.log(`[generateTechnicianRota] PASS 2C: Assigning band 6 technician ${technician.name} (${techWorkingDays.length} days/week) to Management Time`);
+          
+          // Create the assignment
+          assignments.push({
+            technicianId: technician._id,
+            type: "requirement",
+            location: "Management Time",
+            startTime: "09:00",
+            endTime: "17:00",
+            category: "Management"
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(technician._id);
+        }
+      } else {
+        console.log(`[generateTechnicianRota] Not all wards have minimum coverage, cannot assign band 6 technicians to Management Time`);
+      }
+    } else {
+      // We need band 6 technicians to meet minimum requirements
+      console.log(`[generateTechnicianRota] PASS 2A: Cannot reserve band 6 technicians for Management Time - need them for minimum coverage (have ${nonBand6Technicians.length} non-band 6 technicians available for ${totalTechniciansNeeded} needed positions)`);
+      
+      // PASS 2B: Fill minimum requirements using all available technicians
+      console.log(`[generateTechnicianRota] PASS 2B: Ensuring minimum technicians per requirement (using all technicians)`);
+      
+      // Log which requirements still need technicians
+      console.log(`[generateTechnicianRota] Requirements needing assignment:`);
+      for (const requirement of sortedRequirements) {
+        const currentAssignments = requirementAssignments.get(requirement.name) || [];
+        const needsMore = requirement.minTechnicians > currentAssignments.length;
+        console.log(`[generateTechnicianRota] ${requirement.name}: has ${currentAssignments.length}/${requirement.minTechnicians} technicians${needsMore ? ' - NEEDS MORE' : ''}`);
+      }
+      
+      // Assign technicians to requirements that need more
+      for (const requirement of sortedRequirements) {
+        const currentAssignments = requirementAssignments.get(requirement.name) || [];
+        const techniciansNeeded = requirement.minTechnicians - currentAssignments.length;
+        
+        if (techniciansNeeded <= 0) {
+          console.log(`[generateTechnicianRota] PASS 2B: Requirement ${requirement.name} already has enough technicians (${currentAssignments.length}/${requirement.minTechnicians})`);
+          continue;
+        }
+        
+        console.log(`[generateTechnicianRota] PASS 2B: Need ${techniciansNeeded} more technicians for ${requirement.name}`);
+        
+        // Get eligible technicians
+        const eligibleTechnicians = availableTechnicians.filter(t => {
+          // Skip if already assigned
+          if (assignedTechnicians.has(t._id)) {
+            return false;
+          }
+          
+          // Check special training requirements
+          if (requirement.requiresSpecialTraining && requirement.trainingType) {
+            if (requirement.trainingType === "AccuracyChecker") {
+              return t.isAccuracyChecker || false;
+            } else if (requirement.trainingType === "MedsRecTrained") {
+              return t.isMedsRecTrained || false;
+            } else if (t.specialistTraining && requirement.trainingType) {
+              return t.specialistTraining.includes(requirement.trainingType);
+            }
+            return false;
+          }
+          
+          return true;
+        });
+        
+        console.log(`[generateTechnicianRota] PASS 2B: Found ${eligibleTechnicians.length} eligible technicians for ${requirement.name}`);
+        
+        // If no eligible technicians, log a warning
+        if (eligibleTechnicians.length === 0) {
+          console.log(`[generateTechnicianRota] PASS 2B: WARNING - No eligible technicians available for ${requirement.name}!`);
+          continue;
+        }
+        
+        // Sort to prioritize non-band 6 technicians first
+        const sortedTechnicians = [...eligibleTechnicians].sort((a, b) => {
+          if (isBand6(a) && !isBand6(b)) return 1;
+          if (!isBand6(a) && isBand6(b)) return -1;
+          return 0;
+        });
+        
+        // Assign up to the number needed
+        let assignedCount = 0;
+        for (const technician of sortedTechnicians) {
+          if (assignedCount >= techniciansNeeded) {
+            break;
+          }
+          
+          // Skip if already assigned
+          if (assignedTechnicians.has(technician._id)) {
+            continue;
+          }
+          
+          // Log if assigning a band 6 technician
+          if (isBand6(technician)) {
+            console.log(`[generateTechnicianRota] PASS 2B: Assigning band 6 technician ${technician.name} to ${requirement.name} (needed for minimum coverage)`);
+          } else {
+            console.log(`[generateTechnicianRota] PASS 2B: Assigning ${technician.name} to ${requirement.name}`);
+          }
+          
+          assignments.push({
+            technicianId: technician._id,
+            type: "requirement",
+            location: requirement.name,
+            startTime: "09:00",
+            endTime: "17:00",
+            category: requirement.category
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(technician._id);
+          const updatedAssignments = requirementAssignments.get(requirement.name) || [];
+          updatedAssignments.push(technician._id);
+          requirementAssignments.set(requirement.name, updatedAssignments);
+          
+          assignedCount++;
+        }
+        
+        // Record conflict if we couldn't assign enough technicians
+        if (assignedCount < techniciansNeeded) {
+          console.log(`[generateTechnicianRota] PASS 2B: WARNING - Not enough technicians for ${requirement.name}, assigned ${currentAssignments.length + assignedCount}/${requirement.minTechnicians}`);
+          
+          conflicts.push({
+            type: "requirement",
+            description: `Not enough technicians for ${requirement.name}, assigned ${currentAssignments.length + assignedCount}/${requirement.minTechnicians}`,
+            severity: "warning"
+          });
+        }
+      }
+      
+      // Check if we can still assign any band 6 technicians to Management Time
+      console.log(`[generateTechnicianRota] PASS 2C: Checking if any band 6 technicians are available for Management Time`);
+      
+      // Check if all wards have minimum coverage
+      const allWardsHaveMinimumCoverage = sortedRequirements
+        .filter(req => req.category === 'Ward')
+        .every(req => {
+          const currentAssignments = requirementAssignments.get(req.name) || [];
+          return currentAssignments.length >= req.minTechnicians;
+        });
+      
+      if (allWardsHaveMinimumCoverage) {
+        console.log(`[generateTechnicianRota] All wards have minimum coverage`);
+        
+        // Find any remaining unassigned band 6 technicians
+        const availableBand6Technicians = availableTechnicians.filter(t => 
+          !assignedTechnicians.has(t._id) && isBand6(t)
+        );
+        
+        console.log(`[generateTechnicianRota] Found ${availableBand6Technicians.length} unassigned band 6 technicians`);
+        
+        // Assign band 6 technicians to Management Time
+        for (const technician of availableBand6Technicians) {
+          // Get working days for logging
+          const techWorkingDays = (args.workingDays && args.workingDays[technician._id]) || technician.workingDays || [];
+          
+          console.log(`[generateTechnicianRota] PASS 2C: Assigning band 6 technician ${technician.name} (${techWorkingDays.length} days/week) to Management Time`);
+          
+          // Create the assignment
+          assignments.push({
+            technicianId: technician._id,
+            type: "requirement",
+            location: "Management Time",
+            startTime: "09:00",
+            endTime: "17:00",
+            category: "Management"
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(technician._id);
+        }
+      } else {
+        console.log(`[generateTechnicianRota] Not all wards have minimum coverage, cannot assign band 6 technicians to Management Time`);
+      }
+    }
+    
+    // Log unassigned technicians after PASS 2
+    const unassignedAfterPass2 = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+    console.log(`[generateTechnicianRota] PASS 2 COMPLETE: ${unassignedAfterPass2.length} technicians are still unassigned:`);
+    unassignedAfterPass2.forEach(tech => {
+      const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+      console.log(`- ${tech.name} (${techWorkingDays.length} days/week)`);
+    });
+    
+    // PASS 3: Assign remaining technicians to requirements where ideal > minimum
+    console.log(`[generateTechnicianRota] PASS 3: Filling requirements with ideal technicians greater than minimum`);
+    
+    // Get requirements where ideal technicians > minimum technicians
+    const requirementsWithIdealGreaterThanMin = sortedRequirements.filter(req => 
+      (req.idealTechnicians || 0) > req.minTechnicians
+    );
+    
+    console.log(`[generateTechnicianRota] Found ${requirementsWithIdealGreaterThanMin.length} requirements with ideal greater than minimum:`);
+    requirementsWithIdealGreaterThanMin.forEach(req => {
+      const currentAssignments = requirementAssignments.get(req.name) || [];
+      console.log(`[generateTechnicianRota] ${req.name}: has ${currentAssignments.length}/${req.minTechnicians} technicians (ideal: ${req.idealTechnicians || 'N/A'})`);
+    });
+    
+    // Sort these requirements by priority (those furthest from ideal get priority)
+    const prioritizedRequirements = [...requirementsWithIdealGreaterThanMin].sort((a, b) => {
+      const aCurrentCount = (requirementAssignments.get(a.name) || []).length;
+      const bCurrentCount = (requirementAssignments.get(b.name) || []).length;
+      
+      const aGapToIdeal = (a.idealTechnicians || 0) - aCurrentCount;
+      const bGapToIdeal = (b.idealTechnicians || 0) - bCurrentCount;
+      
+      // Sort by gap to ideal (largest gap first)
+      if (aGapToIdeal !== bGapToIdeal) {
+        return bGapToIdeal - aGapToIdeal;
+      }
+      
+      // If gaps are equal, sort by difficulty
+      if (a.difficulty !== b.difficulty) {
+        return b.difficulty - a.difficulty;
+      }
+      
+      // Finally, sort by ideal count
+      return (b.idealTechnicians || 0) - (a.idealTechnicians || 0);
+    });
+    
+    // Get the remaining unassigned technicians
+    const remainingTechnicians = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+    console.log(`[generateTechnicianRota] PASS 3: ${remainingTechnicians.length} technicians available for ideal assignments`);
+    
+    // For each prioritized requirement, assign technicians until we reach the ideal number
+    for (const requirement of prioritizedRequirements) {
+      const currentAssignments = requirementAssignments.get(requirement.name) || [];
+      const idealGap = (requirement.idealTechnicians || 0) - currentAssignments.length;
+      
+      if (idealGap <= 0) {
+        console.log(`[generateTechnicianRota] PASS 3: Requirement ${requirement.name} already at or above ideal count (${currentAssignments.length}/${requirement.idealTechnicians})`);
+        continue;
+      }
+      
+      console.log(`[generateTechnicianRota] PASS 3: Need ${idealGap} more technicians for ${requirement.name} to reach ideal (${requirement.idealTechnicians})`);
+      
+      // Find eligible technicians (those with appropriate training if needed)
+      let eligibleTechnicians = remainingTechnicians.filter(t => {
+        // Skip if already assigned
+        if (assignedTechnicians.has(t._id)) {
+          return false;
+        }
+        
+        // Check special training requirements
+        if (requirement.requiresSpecialTraining && requirement.trainingType) {
+          if (requirement.trainingType === "AccuracyChecker") {
+            return t.isAccuracyChecker || false;
+          } else if (requirement.trainingType === "MedsRecTrained") {
+            return t.isMedsRecTrained || false;
+          } else if (t.specialistTraining && requirement.trainingType) {
+            return t.specialistTraining.includes(requirement.trainingType);
+          }
+          return false;
+        }
+        
+        return true;
+      });
+      
+      // Shuffle eligible technicians for randomization
+      eligibleTechnicians = shuffleArray(eligibleTechnicians);
+      
+      console.log(`[generateTechnicianRota] PASS 3: Found ${eligibleTechnicians.length} eligible technicians for ${requirement.name}`);
+      
+      // Assign up to idealGap technicians
+      let assignedCount = 0;
+      for (const technician of eligibleTechnicians) {
+        if (assignedCount >= idealGap) {
+          break;
+        }
+        
+        // Skip if already assigned
+        if (assignedTechnicians.has(technician._id)) {
+          continue;
+        }
+        
+        // Get working days for logging
+        const techWorkingDays = (args.workingDays && args.workingDays[technician._id]) || technician.workingDays || [];
+        
+        console.log(`[generateTechnicianRota] PASS 3: Assigning ${technician.name} (${techWorkingDays.length} days/week) to ${requirement.name} (ideal staffing)`);
+        
+        // Create the assignment
+        assignments.push({
+          technicianId: technician._id,
+          type: "requirement",
+          location: requirement.name,
+          startTime: "09:00",
+          endTime: "17:00",
+          category: requirement.category
+        });
+        
+        // Update tracking
+        assignedTechnicians.add(technician._id);
+        const updatedAssignments = requirementAssignments.get(requirement.name) || [];
+        updatedAssignments.push(technician._id);
+        requirementAssignments.set(requirement.name, updatedAssignments);
+        
+        assignedCount++;
+      }
+    }
+    
+    // Log unassigned technicians after PASS 3
+    const unassignedAfterPass3 = availableTechnicians.filter(t => !assignedTechnicians.has(t._id));
+    console.log(`[generateTechnicianRota] PASS 3 COMPLETE: ${unassignedAfterPass3.length} technicians are still unassigned:`);
+    unassignedAfterPass3.forEach(tech => {
+      const techWorkingDays = (args.workingDays && args.workingDays[tech._id]) || tech.workingDays || [];
+      console.log(`- ${tech.name} (${techWorkingDays.length} days/week)`);
+    });
+    
+    // PASS 4: Check for unfilled roles and assign technicians to multiple roles if needed
+    console.log(`[generateTechnicianRota] PASS 4: Checking for unfilled roles and assigning technicians to multiple roles if needed`);
+    
+    // Get requirements that need technicians
+    const requirementsWithAssignmentCounts = sortedRequirements.map(req => {
+      const currentAssignments = requirementAssignments.get(req.name) || [];
+      return {
+        requirement: req,
+        currentCount: currentAssignments.length,
+        needed: Math.max(0, req.minTechnicians - currentAssignments.length),
+        isWard: req.category === 'Ward'
+      };
+    });
+    
+    // Filter to just unfilled requirements
+    const unfilledRequirements = requirementsWithAssignmentCounts.filter(item => item.needed > 0);
+    
+    if (unfilledRequirements.length > 0) {
+      console.log(`[generateTechnicianRota] PASS 4: Found ${unfilledRequirements.length} unfilled requirements that need additional technicians:`);
+      unfilledRequirements.forEach(item => {
+        console.log(`- ${item.requirement.name} (${item.requirement.category}): has ${item.currentCount}/${item.requirement.minTechnicians} technicians`); 
+      });
+      
+      // First, identify wards with ZERO technicians and prioritize those
+      const unfilledWards = unfilledRequirements
+        .filter(item => item.isWard && item.currentCount === 0)
+        .sort((a, b) => b.requirement.difficulty - a.requirement.difficulty); // Sort by difficulty descending
+      
+      // Then, look at wards with partial coverage
+      const partiallyFilledWards = unfilledRequirements
+        .filter(item => item.isWard && item.currentCount > 0)
+        .sort((a, b) => a.currentCount - b.currentCount); // Sort by current count (least covered first)
+      
+      // Finally, look at non-ward requirements
+      const unfilledNonWards = unfilledRequirements
+        .filter(item => !item.isWard)
+        .sort((a, b) => a.currentCount - b.currentCount); // Sort by current count (least covered first)
+      
+      // Combine in priority order: uncovered wards, partially filled wards, then non-wards
+      const prioritizedRequirements = [...unfilledWards, ...partiallyFilledWards, ...unfilledNonWards];
+      
+      console.log(`[generateTechnicianRota] PASS 4: Prioritized requirements order:`);
+      prioritizedRequirements.forEach((item, index) => {
+        console.log(`${index + 1}. ${item.requirement.name}: ${item.currentCount}/${item.requirement.minTechnicians} technicians`); 
+      });
+      
+      // Get all technicians with their current assignments and locations
+      const technicianAssignmentInfo = availableTechnicians.map(technician => {
+        // Get all assignments for this technician
+        const techAssignments = assignments.filter(a => a.technicianId === technician._id);
+        
+        // Get a list of locations this technician is already assigned to
+        const assignedLocations = techAssignments.map(a => a.location);
+        
+        // Count assignments by category
+        const wardAssignments = techAssignments.filter(a => a.category === 'Ward').length;
+        const dispensaryAssignments = techAssignments.filter(a => a.category === 'Dispensary').length;
+        const clinicAssignments = techAssignments.filter(a => a.category === 'Clinic').length;
+        
+        return {
+          technician,
+          totalAssignments: techAssignments.length,
+          assignedLocations,
+          wardAssignments,
+          dispensaryAssignments,
+          clinicAssignments
+        };
+      });
+      
+      // For each requirement in our priority list, try to find appropriate technicians
+      for (const item of prioritizedRequirements) {
+        const requirement = item.requirement;
+        const techniciansNeeded = item.needed;
+        
+        console.log(`[generateTechnicianRota] PASS 4: Trying to fill ${requirement.name} (${requirement.category}), needs ${techniciansNeeded} more technicians`);
+        
+        // For each requirement, sort technicians by appropriate criteria
+        let sortedTechnicians = [...technicianAssignmentInfo];
+        
+        // Filter technicians by training requirements first
+        sortedTechnicians = sortedTechnicians.filter(techInfo => {
+          const tech = techInfo.technician;
+          
+          // Check if this technician is already assigned to a ward with doNotSplitAssignment
+          const assignedToNoSplitWard = techInfo.assignedLocations.some(location => {
+            // For now, hardcode EAU as a ward that should not be split
+            // Later this will come from the doNotSplitAssignment property in the database
+            return location.includes('EAU') || location === 'Emergency Assessment Unit';
+          });
+          
+          // If this requirement is EAU, only continue if the technician has no other assignments
+          if ((requirement.name.includes('EAU') || requirement.name === 'Emergency Assessment Unit') && 
+              techInfo.totalAssignments > 0) {
+            return false;
+          }
+          
+          // If technician is already assigned to a no-split ward, don't assign them elsewhere
+          if (assignedToNoSplitWard && !requirement.name.includes('EAU') && 
+              requirement.name !== 'Emergency Assessment Unit') {
+            return false;
+          }
+          
+          // Check special training requirements
+          if (requirement.requiresSpecialTraining && requirement.trainingType) {
+            if (requirement.trainingType === "AccuracyChecker") {
+              return tech.isAccuracyChecker || false;
+            } else if (requirement.trainingType === "MedsRecTrained") {
+              return tech.isMedsRecTrained || false;
+            } else if (tech.specialistTraining && requirement.trainingType) {
+              return tech.specialistTraining.includes(requirement.trainingType);
+            }
+            return false;
+          }
+          return true;
+        });
+        
+        // Custom sorting based on requirement category
+        if (requirement.category === 'Ward') {
+          // For wards, prioritize:
+          // 1. Technicians not already assigned to this ward
+          // 2. Technicians with fewest ward assignments
+          // 3. Technicians with fewest total assignments
+          sortedTechnicians.sort((a, b) => {
+            // First priority: avoid technicians already assigned to this ward
+            const aAssignedToThisWard = a.assignedLocations.includes(requirement.name) ? 1 : 0;
+            const bAssignedToThisWard = b.assignedLocations.includes(requirement.name) ? 1 : 0;
+            
+            if (aAssignedToThisWard !== bAssignedToThisWard) {
+              return aAssignedToThisWard - bAssignedToThisWard; // Prefer technicians not already assigned here
+            }
+            
+            // Second priority: prefer technicians with fewer ward assignments
+            if (a.wardAssignments !== b.wardAssignments) {
+              return a.wardAssignments - b.wardAssignments;
+            }
+            
+            // Last priority: prefer technicians with fewer total assignments
+            return a.totalAssignments - b.totalAssignments;
+          });
+        } else if (requirement.category === 'Dispensary') {
+          // For dispensaries, prioritize:
+          // 1. Technicians not already assigned to this dispensary
+          // 2. Non-band 6 technicians (to preserve band 6 for wards)
+          // 3. Technicians with fewer dispensary assignments
+          // 4. Technicians with fewer total assignments
+          sortedTechnicians.sort((a, b) => {
+            const isABand6 = isBand6(a.technician);
+            const isBBand6 = isBand6(b.technician);
+            
+            // First priority: avoid technicians already assigned to this dispensary
+            const aAssignedToThisDispensary = a.assignedLocations.includes(requirement.name) ? 1 : 0;
+            const bAssignedToThisDispensary = b.assignedLocations.includes(requirement.name) ? 1 : 0;
+            
+            if (aAssignedToThisDispensary !== bAssignedToThisDispensary) {
+              return aAssignedToThisDispensary - bAssignedToThisDispensary;
+            }
+            
+            // Second priority: prefer non-band 6 technicians for dispensary
+            if (isABand6 && !isBBand6) return 1;
+            if (!isABand6 && isBBand6) return -1;
+            
+            if (a.dispensaryAssignments !== b.dispensaryAssignments) {
+              return a.dispensaryAssignments - b.dispensaryAssignments;
+            }
+            
+            return a.totalAssignments - b.totalAssignments;
+          });
+        } else {
+          // For other categories, just sort by total assignments
+          sortedTechnicians.sort((a, b) => a.totalAssignments - b.totalAssignments);
+        }
+        
+        // Log technician candidates
+        console.log(`[generateTechnicianRota] PASS 4: ${sortedTechnicians.length} candidate technicians for ${requirement.name}:`);
+        sortedTechnicians.slice(0, 5).forEach((techInfo, idx) => { // Only log top 5 for brevity
+          console.log(`  ${idx + 1}. ${techInfo.technician.name}: ${techInfo.totalAssignments} total, ${techInfo.wardAssignments} ward, ${techInfo.dispensaryAssignments} dispensary, ${techInfo.clinicAssignments} clinic assignments`);
+        });
+        
+        if (sortedTechnicians.length === 0) {
+          console.log(`[generateTechnicianRota] PASS 4: No eligible technicians available for ${requirement.name}!`);
+          continue;
+        }
+        
+        // Assign technicians to this requirement
+        let assignedCount = 0;
+        for (const techInfo of sortedTechnicians) {
+          if (assignedCount >= techniciansNeeded) break;
+          
+          // Create the additional assignment
+          console.log(`[generateTechnicianRota] PASS 4: Assigning ${techInfo.technician.name} to ${requirement.name} (additional role: ${techInfo.totalAssignments} existing assignments)`);
+          
+          assignments.push({
+            technicianId: techInfo.technician._id,
+            type: "requirement",
+            location: requirement.name,
+            startTime: "09:00",
+            endTime: "17:00",
+            category: requirement.category
+          });
+          
+          // Update requirement assignments tracking
+          const updatedAssignments = requirementAssignments.get(requirement.name) || [];
+          updatedAssignments.push(techInfo.technician._id);
+          requirementAssignments.set(requirement.name, updatedAssignments);
+          
+          // Update the technician's assignment info for subsequent iterations
+          techInfo.totalAssignments++;
+          techInfo.assignedLocations.push(requirement.name);
+          if (requirement.category === 'Ward') {
+            techInfo.wardAssignments++;
+          } else if (requirement.category === 'Dispensary') {
+            techInfo.dispensaryAssignments++;
+          } else if (requirement.category === 'Clinic') {
+            techInfo.clinicAssignments++;
+          }
+          
+          assignedCount++;
+        }
+        
+        // If we still couldn't assign enough technicians, log a warning
+        if (assignedCount < techniciansNeeded) {
+          const totalAssigned = (requirementAssignments.get(requirement.name) || []).length;
+          console.log(`[generateTechnicianRota] PASS 4: WARNING - Still not enough technicians for ${requirement.name}, assigned ${totalAssigned}/${requirement.minTechnicians}`);
+          
+          conflicts.push({
+            type: "requirement",
+            description: `Not enough technicians for ${requirement.name}, assigned ${totalAssigned}/${requirement.minTechnicians} after multiple role assignments`,
+            severity: "warning"
+          });
+        }
+      }
+    } else {
+      console.log(`[generateTechnicianRota] PASS 4: All requirements already have minimum coverage, no need for multiple role assignments`);
+    }
+    
+    // PASS 5: Specifically look for technicians with multiple assignments and reassign to band 6 technicians
+    console.log(`[generateTechnicianRota] PASS 5: Reassigning roles from multi-assigned technicians to band 6 technicians`);
+    
+    // 1. Find all technicians with multiple assignments
+    const technicianAssignmentMap = new Map<Id<"technicians">, TechnicianAssignment[]>();
+    for (const assignment of assignments) {
+      const existingAssignments = technicianAssignmentMap.get(assignment.technicianId) || [];
+      existingAssignments.push(assignment);
+      technicianAssignmentMap.set(assignment.technicianId, existingAssignments);
+    }
+    
+    // 2. Sort technicians by number of assignments (most first)
+    const techniciansWithMultipleAssignments = Array.from(technicianAssignmentMap.entries())
+      .filter(([_, techAssignments]) => techAssignments.length > 1)
+      .sort((a, b) => b[1].length - a[1].length);
+    
+    console.log(`[generateTechnicianRota] PASS 5: Found ${techniciansWithMultipleAssignments.length} technicians with multiple assignments:`);
+    for (const [techId, techAssignments] of techniciansWithMultipleAssignments) {
+      const tech = technicians.find(t => t._id === techId);
+      console.log(`- ${tech?.name || 'Unknown'}: ${techAssignments.length} assignments - ${techAssignments.map(a => a.location).join(', ')}`);
+    }
+    
+    // 3. Find band 6 technicians with zero or one assignment
+    const band6TechniciansWithFewAssignments = Array.from(technicianAssignmentMap.entries())
+      .filter(([techId, techAssignments]) => {
+        const tech = technicians.find(t => t._id === techId);
+        return tech && isBand6(tech) && techAssignments.length <= 1;
+      })
+      .sort((a, b) => a[1].length - b[1].length); // Sort by fewest assignments first
+    
+    console.log(`[generateTechnicianRota] PASS 5: Found ${band6TechniciansWithFewAssignments.length} band 6 technicians with ≤1 assignment:`);
+    for (const [techId, techAssignments] of band6TechniciansWithFewAssignments) {
+      const tech = technicians.find(t => t._id === techId);
+      console.log(`- ${tech?.name || 'Unknown'}: ${techAssignments.length} assignments - ${techAssignments.map(a => a.location).join(', ')}`);
+    }
+    
+    // 4. Process reassignments
+    if (techniciansWithMultipleAssignments.length > 0 && band6TechniciansWithFewAssignments.length > 0) {
+      // Track which band 6 technicians we've already reassigned to
+      const reassignedBand6TechIds = new Set<Id<"technicians">>();
+      
+      // For each technician with multiple assignments
+      for (const [overloadedTechId, techAssignments] of techniciansWithMultipleAssignments) {
+        const overloadedTech = technicians.find(t => t._id === overloadedTechId);
+        if (!overloadedTech) continue;
+        
+        // Skip band 6 technicians (we don't want to reassign from band 6)
+        if (isBand6(overloadedTech)) continue;
+        
+        // Sort assignments by category - prefer to reassign ward assignments if possible
+        const sortedAssignments = [...techAssignments].sort((a, b) => {
+          // Prioritize ward assignments for reassignment
+          if (a.category === 'Ward' && b.category !== 'Ward') return -1;
+          if (a.category !== 'Ward' && b.category === 'Ward') return 1;
+          return 0;
+        });
+        
+        // Try to find an available band 6 technician
+        for (const [band6TechId, band6Assignments] of band6TechniciansWithFewAssignments) {
+          // Skip if this band 6 tech has already been reassigned to
+          if (reassignedBand6TechIds.has(band6TechId)) continue;
+          
+          const band6Tech = technicians.find(t => t._id === band6TechId);
+          if (!band6Tech) continue;
+          
+          // Check if there's an assignment we can reassign
+          const assignmentToReassign = sortedAssignments[0]; // Take the first assignment (ward if available)
+          
+          console.log(`[generateTechnicianRota] PASS 5: Reassigning ${assignmentToReassign.location} from ${overloadedTech.name} to band 6 technician ${band6Tech.name}`);
+          
+          // Find this assignment in the main assignments array
+          const assignmentIndex = assignments.findIndex(a => 
+            a.technicianId === overloadedTechId && 
+            a.location === assignmentToReassign.location);
+          
+          if (assignmentIndex >= 0) {
+            // Update the assignment with the band 6 technician
+            assignments[assignmentIndex] = {
+              ...assignmentToReassign,
+              technicianId: band6TechId
+            };
+            
+            // Also update requirement assignments tracking
+            const reqAssignments = requirementAssignments.get(assignmentToReassign.location) || [];
+            const techIndex = reqAssignments.findIndex(id => id === overloadedTechId);
+            if (techIndex >= 0) {
+              reqAssignments[techIndex] = band6TechId;
+              requirementAssignments.set(assignmentToReassign.location, reqAssignments);
+            }
+            
+            // Mark this band 6 technician as reassigned to
+            reassignedBand6TechIds.add(band6TechId);
+            
+            // We've reassigned one assignment for this overloaded technician, so break
+            break;
+          }
+        }
+      }
+      
+      console.log(`[generateTechnicianRota] PASS 5: Completed ${reassignedBand6TechIds.size} reassignments`);
+    } else {
+      console.log(`[generateTechnicianRota] PASS 5: No reassignments needed or possible`);
+    }
+    
+    // PASS 6: Final check to remove EAU assignment if technician is split
+    console.log(`[generateTechnicianRota] PASS 6: Checking for technicians split between EAU and other assignments`);
+    
+    const finalAssignments: TechnicianAssignment[] = [];
+    const techniciansWithEAUAssignments = new Set<Id<"technicians">>();
+    const techniciansWithOtherAssignments = new Set<Id<"technicians">>();
+
+    // First, identify technicians with EAU and other assignments
+    for (const assignment of assignments) {
+      if (assignment.location.includes('EAU') || assignment.location === 'Emergency Assessment Unit') {
+        techniciansWithEAUAssignments.add(assignment.technicianId);
+      } else {
+        techniciansWithOtherAssignments.add(assignment.technicianId);
+      }
+    }
+
+    let eauAssignmentsRemovedCount = 0;
+    for (const assignment of assignments) {
+      const technicianId = assignment.technicianId;
+      const isEAUAssignment = assignment.location.includes('EAU') || assignment.location === 'Emergency Assessment Unit';
+
+      // If this is an EAU assignment AND the technician also has other assignments, skip this EAU assignment
+      if (isEAUAssignment && techniciansWithOtherAssignments.has(technicianId)) {
+        console.log(`[generateTechnicianRota] PASS 6: Removing EAU assignment for ${technicianId} because they are also assigned elsewhere.`);
+        eauAssignmentsRemovedCount++;
+        // Also remove this technician from the EAU set so we don't count them as solely EAU assigned
+        // This isn't strictly necessary for this logic pass but good for consistency if we added more logic later
+        techniciansWithEAUAssignments.delete(technicianId); 
+        continue; // Skip adding this EAU assignment
+      }
+      finalAssignments.push(assignment);
+    }
+    
+    if (eauAssignmentsRemovedCount > 0) {
+      console.log(`[generateTechnicianRota] PASS 6: Removed ${eauAssignmentsRemovedCount} EAU assignments due to technicians being split.`);
+      assignments = finalAssignments; // Update the main assignments array
+    } else {
+      console.log(`[generateTechnicianRota] PASS 6: No EAU assignments needed to be removed.`);
+    }
+
+    // EMERGENCY: If we still have no assignments at all, force assign technicians to requirements
+    if (assignments.length === 0) {
+      console.log(`[generateTechnicianRota] EMERGENCY - No assignments created yet, forcing assignments`);
+      
+      // Assign any technician to any requirement to ensure we have some assignments
+      for (const technician of availableTechnicians) {
+        // Skip if already assigned
+        if (assignedTechnicians.has(technician._id)) {
+          continue;
+        }
+        
+        // Find a requirement to assign them to (any requirement)
+        for (const requirement of sortedRequirements) {
+          console.log(`[generateTechnicianRota] EMERGENCY: Assigning ${technician.name} to ${requirement.name}`);
+          
+          assignments.push({
+            technicianId: technician._id,
+            type: "requirement",
+            location: requirement.name,
+            startTime: "09:00",
+            endTime: "17:00",
+            category: requirement.category
+          });
+          
+          // Update tracking
+          assignedTechnicians.add(technician._id);
+          break; // Only assign to one requirement
+        }
+        
+        // If we've assigned at least one technician, that's enough for emergency purposes
+        if (assignments.length > 0) {
+          console.log(`[generateTechnicianRota] EMERGENCY: Created ${assignments.length} emergency assignments`);
+          break;
+        }
+      }
+    }
+
+    // Summary of assignments before saving
+    console.log(`[generateTechnicianRota] SUMMARY: Created ${assignments.length} total assignments`);
+    if (assignments.length > 0) {
+      // Count assignments per requirement
+      const assignmentsByRequirement = new Map<string, number>();
+      for (const assignment of assignments) {
+        const count = assignmentsByRequirement.get(assignment.location) || 0;
+        assignmentsByRequirement.set(assignment.location, count + 1);
+      }
+      
+      // Log counts
+      console.log(`[generateTechnicianRota] Assignment breakdown by requirement:`);
+      for (const [requirement, count] of assignmentsByRequirement.entries()) {
+        console.log(`[generateTechnicianRota] - ${requirement}: ${count} technicians`);
+      }
+    } else {
+      console.log(`[generateTechnicianRota] WARNING: Still no assignments after all passes. Check requirement configuration!`);
+    }
+    
+    // Create a rota record in the database
+    const rotaId = await ctx.db.insert("technicianRotas", {
+      date: args.date,
+      assignments,
+      conflicts,
+      includedWeekdays: args.selectedWeekdays || [],
+      staffIds: args.technicianIds,
+      status: "draft"
+    });
+    
+    // Update the rota with the generated assignments
+    await ctx.db.patch(rotaId, {
+      assignments,
+      conflicts,
+      status: 'draft'
+    });
+    
+    console.log(`[generateTechnicianRota] Saved ${assignments.length} assignments to rota ${rotaId}`);
+    
+    // Return the rota ID and assignments
+    return {
+      assignments,
+      conflicts,
+      rotaId
+    };
+  }
+});
+
+// Generate weekly rota
+export const generateWeeklyRota = mutation({
+  args: {
+    startDate: v.string(), // Monday date (YYYY-MM-DD)
+    technicianIds: v.array(v.id("technicians")),
+    includeWarfarinClinics: v.optional(v.boolean()),
+    ignoredUnavailableRules: v.optional(v.object({
+      technicianId: v.string(),
+      ruleIndices: v.array(v.number())
+    })),
+    selectedWeekdays: v.optional(v.array(v.string())),
+    workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+    additionalRolesByDay: v.optional(v.record(v.string(), v.array(v.object({
+      roleId: v.string(),
+      roleName: v.string()
+    })))) 
+  },
+  handler: async (ctx, args) => {
+    const rotaIdsByDate: Record<string, string> = {};
+    let allAssignments: any[] = [];
+    
+    console.log('\n=== BACKEND: PROCESSING WEEKLY ROTA (Corrected Validator Version) ===');
+    console.log('Additional roles by day received:', JSON.stringify(args.additionalRolesByDay, null, 2));
+    console.log('Selected weekdays:', args.selectedWeekdays || []);
+    
+    for (let i = 0; i < 7; i++) {
+      const dateObj = new Date(args.startDate);
+      dateObj.setDate(dateObj.getDate() + i);
+      const dateString = dateObj.toISOString().split('T')[0];
+      
+      const dayOfWeek = dateObj.getDay();
+      const dayName = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"][dayOfWeek];
+      
+      const selectedWeekdays = args.selectedWeekdays || [];
+      if (!selectedWeekdays.includes(dayName)) {
+        console.log(`\n[${dayName}] Skipping - not in selected weekdays`);
+        continue;
+      }
+      
+      console.log(`\n[${dayName}] Processing day (${dateString})`);
+      
+      const rolesForThisDayObjects = args.additionalRolesByDay?.[dayName] || [];
+      const daySpecificRoleNames = rolesForThisDayObjects.map(role => role.roleName);
+      
+      console.log(`[${dayName}] Additional role names for this day:`, daySpecificRoleNames);
+      
+      const result = await ctx.runMutation(internal.technicianRotas.generateTechnicianRota, {
+        date: dateString,
+        technicianIds: args.technicianIds,
+        includeWarfarinClinics: args.includeWarfarinClinics,
+        ignoredUnavailableRules: args.ignoredUnavailableRules,
+        selectedWeekdays: args.selectedWeekdays,
+        workingDays: args.workingDays,
+        additionalRoles: daySpecificRoleNames 
+      });
+      
+      rotaIdsByDate[dateString] = result.rotaId;
+      const rota = await ctx.db.get(result.rotaId);
+      if (rota && rota.assignments) {
+        allAssignments = allAssignments.concat(rota.assignments.map(a => ({ ...a, date: rota.date })));
+      }
+    }
+    
+    console.log('All assignments generated:', allAssignments.length);
+    return { rotaIdsByDate, assignments: allAssignments };
+  }
+});
+
+// List rotas
+export const listRotas = query({
+  args: {
+    status: v.optional(v.union(v.literal("draft"), v.literal("published"), v.literal("archived")))
+  },
+  handler: async (ctx, args) => {
+    const query = ctx.db.query("technicianRotas");
+    
+    if (args.status) {
+      return await query.filter(q => q.eq(q.field("status"), args.status)).collect();
+    }
+    
+    return await query.collect();
+  }
+});
+
+// Get a specific rota
+export const getRota = query({
+  args: { rotaId: v.id("technicianRotas") },
+  handler: async (ctx, args) => {
+    const rota = await ctx.db.get(args.rotaId);
+    console.log('[getRota] Rota:', args.rotaId, rota);
+    return rota;
+  }
+});
+
+// Helper function to add days to a date string
+function addDays(dateString: string, days: number): string {
+  const date = new Date(dateString);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().split('T')[0];
+}
+
+// Save rota configuration
+export const saveRotaConfiguration = mutation({
+  args: {
+    weekStartDate: v.string(),
+    technicianIds: v.array(v.id("technicians")),
+    includeWarfarinClinics: v.optional(v.boolean()),
+    selectedWeekdays: v.array(v.string()),
+    workingDays: v.optional(v.record(v.string(), v.array(v.string()))), // Map of technicianId to their working days
+    ignoredUnavailableRules: v.optional(
+      v.union(
+        v.object({
+          technicianId: v.string(),
+          ruleIndices: v.array(v.number())
+        }),
+        v.null()
+      )
+    ) as any, // Using 'as any' to handle the type mismatch between Convex validation and TypeScript types
+  },
+  handler: async (ctx, args) => {
+    // Check if a configuration already exists for this week
+    const existingConfig = await ctx.db.query("technicianRotaConfigurations")
+      .filter(q => q.eq(q.field("weekStartDate"), args.weekStartDate))
+      .first();
+    
+    if (existingConfig) {
+      // Update existing configuration
+      return await ctx.db.patch(existingConfig._id, {
+        technicianIds: args.technicianIds,
+        includeWarfarinClinics: args.includeWarfarinClinics,
+        selectedWeekdays: args.selectedWeekdays,
+        workingDays: args.workingDays,
+        ignoredUnavailableRules: args.ignoredUnavailableRules,
+        lastUpdated: new Date().toISOString()
+      });
+    } else {
+      // Create new configuration
+      return await ctx.db.insert("technicianRotaConfigurations", {
+        weekStartDate: args.weekStartDate,
+        technicianIds: args.technicianIds,
+        includeWarfarinClinics: args.includeWarfarinClinics,
+        selectedWeekdays: args.selectedWeekdays,
+        workingDays: args.workingDays,
+        ignoredUnavailableRules: args.ignoredUnavailableRules,
+        lastUpdated: new Date().toISOString()
+      });
+    }
+  }
+});
+
+// Get rota configuration
+export const getRotaConfiguration = query({
+  args: {
+    weekStartDate: v.string()
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.query("technicianRotaConfigurations")
+      .filter(q => q.eq(q.field("weekStartDate"), args.weekStartDate))
+      .first();
+  }
+});
+
+// Update a rota assignment
+export const updateRotaAssignment = mutation({
+  args: {
+    rotaId: v.id("technicianRotas"),
+    assignmentIndex: v.number(),
+    technicianId: v.id("technicians"),
+  },
+  handler: async (ctx, args) => {
+    const rota = await ctx.db.get(args.rotaId);
+    
+    if (!rota) {
+      throw new Error("Rota not found");
+    }
+    
+    // Update the assignment
+    const assignments = [...(rota.assignments || [])];
+    if (assignments[args.assignmentIndex]) {
+      assignments[args.assignmentIndex] = {
+        ...assignments[args.assignmentIndex],
+        technicianId: args.technicianId
+      };
+    }
+    
+    await ctx.db.patch(args.rotaId, { assignments });
+    return args.rotaId;
+  }
+});
+
+// Publish a technician rota
+export const publishRota = mutation({
+  args: { 
+    rotaId: v.id("technicianRotas"),
+    userName: v.optional(v.string()),
+    weekStartDate: v.string()
+  },
+  handler: async (ctx, args) => {
+    const { rotaId, userName: providedUserName, weekStartDate } = args;
+    console.log(`[publishTechnicianRota] STARTING PUBLISH of rotaId: ${rotaId} for week starting ${weekStartDate}`);
+    
+    try {
+      // Get the rota to publish as a reference
+      const rotaToPublish = await ctx.db.get(rotaId);
+      if (!rotaToPublish) throw new Error("Rota not found");
+      
+      const date = rotaToPublish.date;
+      if (!date) throw new Error("Rota has no date");
+      console.log(`[publishTechnicianRota] Using reference rota for date: ${date}`);
+      
+      // Determine the user name to display
+      let userName = "Unknown User";
+      const identity = await ctx.auth.getUserIdentity();
+      
+      // First priority: Use the provided userName from the frontend
+      if (providedUserName) {
+        userName = providedUserName;
+        console.log(`[publishTechnicianRota] Using provided userName: ${userName}`);
+      } 
+      // Second priority: Use the authenticated identity
+      else if (identity) {
+        if (identity.name && identity.email) {
+          userName = `${identity.name} (${identity.email})`;
+        } else if (identity.name) {
+          userName = identity.name;
+        } else if (identity.email) {
+          // Format email address into a readable name
+          const email = identity.email;
+          const namePart = email.split('@')[0]
+            .split(/[._]/)
+            .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+            .join(' ');
+          userName = `${namePart} (${email})`;
+        }
+        console.log(`[publishTechnicianRota] Using identity for userName: ${userName}`);
+      } else {
+        console.log(`[publishTechnicianRota] No user information available, using default: ${userName}`);
+      }
+      
+      // Get all DRAFT rotas for this week only
+      console.log(`[publishTechnicianRota] Finding all draft rotas for week starting ${weekStartDate}`);
+      const allRotasForWeek = await ctx.db.query("technicianRotas")
+        .filter(q => {
+          // Logic to filter rotas by the same week and only draft status
+          const rotaDate = q.field("date");
+          const rotaStatus = q.field("status");
+          // Use a string comparison for the week start date
+          return q.and(
+            q.eq(rotaStatus, "draft"),                     // only draft rotas
+            q.gte(rotaDate, weekStartDate),               // rota date >= week start
+            q.lt(rotaDate, addDays(weekStartDate, 7))     // rota date < week start + 7 days
+          );
+        })
+        .collect();
+        
+      console.log(`[publishTechnicianRota] Found ${allRotasForWeek.length} draft rotas for week starting ${weekStartDate}`);
+      
+      // Group rotas by date and keep only the most recent one for each date
+      const rotasByDate = new Map<string, Doc<"technicianRotas">>(); 
+      
+      // Sort rotas by creation time (newest first) and keep only the latest for each date
+      allRotasForWeek
+        .sort((a, b) => b._creationTime - a._creationTime)
+        .forEach(rota => {
+          if (!rotasByDate.has(rota.date)) {
+            rotasByDate.set(rota.date, rota);
+          }
+        });
+      
+      // Get the final list of rotas to publish (only the most recent for each date)
+      const rotasForWeek = Array.from(rotasByDate.values());
+      
+      console.log(`[publishTechnicianRota] After filtering, publishing ${rotasForWeek.length} rotas (latest per day) for week starting ${weekStartDate}`);
+      
+      // Create metadata for the published rota set
+      const now = new Date();
+      const publishedAt = now.toISOString(); 
+      const formattedDate = now.toLocaleDateString();
+      const formattedTime = now.toLocaleTimeString();
+      
+      // Create a unique ID for this published set
+      const publishedSetId = `${weekStartDate}-${Date.now()}`;
+      
+      // Archive any previously published rotas for THIS WEEK
+      console.log(`[publishTechnicianRota] Finding any previously published rotas for week starting ${weekStartDate}`);
+      const publishedRotasForSameWeek = await ctx.db.query("technicianRotas")
+        .filter(q => 
+          q.and(
+            q.eq(q.field("status"), "published"),
+            q.gte(q.field("date"), weekStartDate),
+            q.lt(q.field("date"), addDays(weekStartDate, 7))
+          )
+        )
+        .collect();
+      
+      console.log(`[publishTechnicianRota] Found ${publishedRotasForSameWeek.length} previously published rotas for week starting ${weekStartDate}`);
+      
+      // Archive previously published rotas
+      if (publishedRotasForSameWeek.length > 0) {
+        for (const prevRota of publishedRotasForSameWeek) {
+          console.log(`[publishTechnicianRota] Archiving previously published rota: ${prevRota._id} (${prevRota.date})`);
+          await ctx.db.patch(prevRota._id, { status: "archived" });
+        }
+      }
+      
+      // Create a new set of published rotas (as carbon copies)
+      const publishedRotaIds = [];
+      
+      for (const rota of rotasForWeek) {
+        // Create a new document that is a carbon copy, but with published status
+        console.log(`[publishTechnicianRota] Creating carbon copy of rota ${rota._id} for date ${rota.date}`);
+        
+        // Create a new rota document with all the same data plus publication metadata
+        // Extract fields from the original rota, excluding _id and _creationTime
+        const { _id, _creationTime, ...rotaData } = rota;
+        
+        const newRotaId = await ctx.db.insert("technicianRotas", {
+          ...rotaData,      // Copy all relevant fields from original
+          status: "published",
+          publishedBy: {
+            name: userName.split('(')[0].trim(),
+            email: userName.includes('(') ? userName.split('(')[1].replace(')', '') : ''
+          },
+          publishedDate: publishedAt,
+          publishDate: formattedDate, // Add formatted date for display
+          publishTime: formattedTime   // Add formatted time for display
+        });
+        
+        publishedRotaIds.push(newRotaId);
+      }
+      
+      console.log(`[publishTechnicianRota] Successfully published ${publishedRotaIds.length} rotas for week starting ${weekStartDate}`);
+      console.log(`[publishTechnicianRota] Published by: ${userName} at ${formattedDate} ${formattedTime}`);
+      console.log(`[publishTechnicianRota] Published set ID: ${publishedSetId}`);
+      
+      return { 
+        publishedRotaIds,
+        publishedSetId
+      };
+      
+    } catch (error) {
+      console.error(`[publishTechnicianRota] ERROR publishing rota ${rotaId}:`, error);
+      throw error;
+    }
+  },
+});
+
+// Archive a technician rota
+export const archiveRota = mutation({
+  args: {
+    rotaId: v.id("technicianRotas"),
+    weekStartDate: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { rotaId, weekStartDate } = args;
+    
+    // First, find all published rotas for this week
+    const publishedRotasForWeek = await ctx.db.query("technicianRotas")
+      .filter(q => 
+        q.and(
+          q.eq(q.field("status"), "published"),
+          q.gte(q.field("date"), weekStartDate),
+          q.lt(q.field("date"), addDays(weekStartDate, 7))
+        )
+      )
+      .collect();
+    
+    console.log(`[archiveRota] Found ${publishedRotasForWeek.length} published rotas for week starting ${weekStartDate}`);
+    
+    // Archive all published rotas for this week
+    for (const rota of publishedRotasForWeek) {
+      console.log(`[archiveRota] Archiving rota ${rota._id} (${rota.date})`);
+      await ctx.db.patch(rota._id, { status: "archived" });
+    }
+    
+    return { success: true, count: publishedRotasForWeek.length };
+  },
+});
+
+// Save free cell text for technician rotas
+export const saveFreeCellText = mutation({
+  args: { 
+    rotaId: v.id("technicianRotas"),
+    freeCellText: v.record(v.string(), v.string())
+  },
+  handler: async (ctx, args) => {
+    const { rotaId, freeCellText } = args;
+    await ctx.db.patch(rotaId, { freeCellText });
+    return rotaId;
+  }
+});
+
+// Delete archived rotas for a specific week or before a date
+export const deleteArchivedRotas = mutation({
+  args: {
+    // Allow deleting rotas for a specific week, or before a certain date
+    weekStartDate: v.optional(v.string()),
+    beforeDate: v.optional(v.string()),
+    // Require admin confirmation to prevent accidental deletion
+    adminConfirmation: v.string()
+  },
+  handler: async (ctx, args) => {
+    // Verify admin confirmation
+    if (args.adminConfirmation !== "confirm-delete-archived-rotas") {
+      throw new Error("Invalid admin confirmation. Please provide the correct confirmation code.");
+    }
+    
+    let query = ctx.db
+      .query("technicianRotas")
+      .filter(q => q.eq(q.field("status"), "archived"));
+    
+    // Add week filter if specified
+    if (args.weekStartDate && typeof args.weekStartDate === 'string') {
+      // Get the week end date (Sunday)
+      const startDate = new Date(args.weekStartDate);
+      const endDate = new Date(startDate);
+      endDate.setDate(startDate.getDate() + 6);
+      const weekEndDate = endDate.toISOString().split('T')[0];
+      
+      // Filter by date range
+      query = query.filter(q => 
+        q.and(
+          q.gte(q.field("date"), args.weekStartDate as string),
+          q.lte(q.field("date"), weekEndDate)
+        )
+      );
+    }
+    
+    // Add before date filter if specified
+    if (args.beforeDate && typeof args.beforeDate === 'string') {
+      query = query.filter(q => q.lt(q.field("date"), args.beforeDate as string));
+    }
+    
+    // Get archived rotas
+    const rotasToDelete = await query.collect();
+    
+    // Delete each archived rota
+    const deletedIds = [];
+    for (const rota of rotasToDelete) {
+      try {
+        console.log(`Attempting to delete technician rota:`, {
+          id: rota._id,
+          date: rota.date,
+          status: rota.status
+        });
+        
+        // First verify the rota exists
+        const existingRota = await ctx.db.get(rota._id);
+        if (!existingRota) {
+          console.log(`Technician rota ${rota._id} not found, skipping...`);
+          continue;
+        }
+        
+        // Delete the rota
+        console.log(`Deleting technician rota ${rota._id}...`);
+        await ctx.db.delete(rota._id);
+        
+        console.log(`Successfully deleted technician rota ${rota._id} for date ${rota.date}`);
+        deletedIds.push(rota._id);
+      } catch (error) {
+        console.error(`Failed to delete technician rota ${rota._id}:`, error);
+        // Rethrow the error to see it in the client
+        throw error;
+      }
+    }
+    
+    // Return summary of deleted rotas
+    return {
+      deletedCount: rotasToDelete.length,
+      deletedIds: deletedIds,
+      message: `Successfully deleted ${rotasToDelete.length} archived technician rotas.`
+    };
+  },
+});
+
+// List all rotas

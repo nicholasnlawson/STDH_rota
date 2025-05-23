@@ -97,22 +97,58 @@ export function RotaView({
   const [publishSuccess, setPublishSuccess] = useState(false);
   // Track current user for tracking metadata when publishing
   const [currentUser, setCurrentUser] = useState<{name: string, email: string}>(() => {
-    // Try to get user info from localStorage - use currentPharmacist which is the correct key
+    // Try to get user info from localStorage - check both possible storage keys
     const storedUser = localStorage.getItem('currentPharmacist');
-    return storedUser ? JSON.parse(storedUser) : { name: 'Unknown User', email: '' };
+    const storedUserAlternative = localStorage.getItem('user');
+    
+    if (storedUser) {
+      const userData = JSON.parse(storedUser);
+      return { name: userData.name || 'Unknown User', email: userData.email || '' };
+    } else if (storedUserAlternative) {
+      const userData = JSON.parse(storedUserAlternative);
+      // Also store in currentPharmacist for consistency
+      localStorage.setItem('currentPharmacist', JSON.stringify({
+        name: userData.name || '',
+        email: userData.email || ''
+      }));
+      return { name: userData.name || 'Unknown User', email: userData.email || '' };
+    } else {
+      return { name: 'Unknown User', email: '' };
+    }
   });
   
   // Update currentUser whenever localStorage changes
   useEffect(() => {
     const handleStorageChange = () => {
+      // Check both possible storage locations for user data
       const storedUser = localStorage.getItem('currentPharmacist');
+      const storedUserAlternative = localStorage.getItem('user');
+      
       if (storedUser) {
-        setCurrentUser(JSON.parse(storedUser));
+        const userData = JSON.parse(storedUser);
+        setCurrentUser({
+          name: userData.name || 'Unknown User',
+          email: userData.email || ''
+        });
+      } else if (storedUserAlternative) {
+        const userData = JSON.parse(storedUserAlternative);
+        setCurrentUser({
+          name: userData.name || 'Unknown User',
+          email: userData.email || ''
+        });
+        // Also store in currentPharmacist for consistency
+        localStorage.setItem('currentPharmacist', JSON.stringify({
+          name: userData.name || '',
+          email: userData.email || ''
+        }));
       }
     };
     
     // Check if we need to update right away
     handleStorageChange();
+    
+    // Output the current user for debugging
+    console.log('Current user when component mounts:', currentUser);
     
     // Listen for changes
     window.addEventListener('storage', handleStorageChange);
@@ -1311,9 +1347,20 @@ export function RotaView({
       
       // Now publish the entire week's rotas as carbon copies (with the saved free cell text)
       const firstRotaId = rotaIds[0];
+      // Format user information to include both name and email if available
+      let userName = 'Unknown User';
+      if (currentUser.name && currentUser.email) {
+        userName = `${currentUser.name} (${currentUser.email})`;
+      } else if (currentUser.name) {
+        userName = currentUser.name;
+      } else if (currentUser.email) {
+        userName = currentUser.email;
+      }
+      
+      console.log(`Publishing rota with user: ${userName}`);
       const result = await publishRota({ 
         rotaId: firstRotaId,
-        userName: currentUser.name || currentUser.email || 'Unknown User',
+        userName,
         weekStartDate: selectedMonday
       });
       

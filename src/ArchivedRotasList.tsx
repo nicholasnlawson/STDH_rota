@@ -9,7 +9,7 @@ interface ArchivedRotasListProps {
 }
 
 export function ArchivedRotasList({ isAdmin = false }: ArchivedRotasListProps) {
-  const rotas = useQuery(api.rotas.listRotas) || [];
+  const rotas = useQuery(api.rotas.listRotas, {}) || [];
   const [viewingWeekStart, setViewingWeekStart] = useState<string | null>(null);
 
   // Filter for archived rotas only
@@ -87,8 +87,7 @@ export function ArchivedRotasList({ isAdmin = false }: ArchivedRotasListProps) {
         <div className="bg-yellow-50 p-4 mb-6 rounded-lg border border-yellow-200">
           <p className="text-sm text-yellow-800">
             <strong>Published by:</strong> {formatPublishedBy(viewingWeekRotas[0].publishedBy) || 'Unknown'}<br/>
-            <strong>Published on:</strong> {viewingWeekRotas[0].publishDate ? `${viewingWeekRotas[0].publishDate}, ${viewingWeekRotas[0].publishTime || ''}` : 'Unknown'}<br/>
-            <strong>Archived on:</strong> {viewingWeekRotas[0].archivedAt ? new Date(viewingWeekRotas[0].archivedAt).toLocaleString() : 'Unknown'}
+            <strong>Published on:</strong> {viewingWeekRotas[0].publishDate ? `${viewingWeekRotas[0].publishDate}, ${viewingWeekRotas[0].publishTime || ''}` : 'Unknown'}
           </p>
         </div>
         
@@ -104,10 +103,9 @@ export function ArchivedRotasList({ isAdmin = false }: ArchivedRotasListProps) {
   }
 
   return (
-    <div className="p-4 max-w-6xl mx-auto">
-      <h2 className="text-2xl font-semibold mb-4 text-center">Archived Rotas</h2>
+    <div className="w-full">
       {uniqueWeeks.length === 0 ? (
-        <div className="text-gray-500 text-center">No archived rotas available.</div>
+        <div className="text-gray-500 text-center py-8">No archived rotas available.</div>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
           {uniqueWeeks.map(weekStart => {
@@ -116,17 +114,16 @@ export function ArchivedRotasList({ isAdmin = false }: ArchivedRotasListProps) {
             if (!firstRotaInWeek) return null;
 
             return (
-              <div key={weekStart} className="bg-white rounded-lg shadow-md overflow-hidden">
+              <div key={weekStart} className="bg-white rounded-lg shadow-md overflow-hidden border border-gray-200 hover:shadow-lg transition-shadow">
                 <div className="p-4">
-                  <h3 className="font-semibold text-lg mb-2">Week of {weekStart}</h3>
-                  <div className="text-sm text-gray-600 mb-3">
-                    <p><span className="font-medium">Published by:</span> {formatPublishedBy(firstRotaInWeek.publishedBy)}</p>
-                    <p>
+                  <h3 className="font-semibold text-lg text-gray-800 mb-3">Week of {weekStart}</h3>
+                  <div className="space-y-2 text-sm text-gray-600 mb-4">
+                    <div>
+                      <span className="font-medium">Published by:</span> {formatPublishedBy(firstRotaInWeek.publishedBy)}
+                    </div>
+                    <div>
                       <span className="font-medium">Published on:</span> {firstRotaInWeek.publishDate ? `${firstRotaInWeek.publishDate}, ${firstRotaInWeek.publishTime || ''}` : 'Unknown'}
-                    </p>
-                    <p>
-                      <span className="font-medium">Archived on:</span> {firstRotaInWeek.archivedAt ? new Date(firstRotaInWeek.archivedAt).toLocaleString() : 'Unknown'}
-                    </p>
+                    </div>
                   </div>
                   <button
                     onClick={() => setViewingWeekStart(weekStart)}

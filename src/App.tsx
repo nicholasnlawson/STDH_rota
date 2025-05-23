@@ -2,6 +2,14 @@ import { SignInForm } from "./SignInForm";
 import Home from "./Home";
 import { useEffect, useState } from "react";
 import { AppHeader } from "./AppHeader";
+import { Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { RotaTypeSelector } from "./RotaTypeSelector";
+import { TechnicianHome } from "./TechnicianHome";
+import { PharmacistList } from "./PharmacistList";
+import { RequirementsList } from "./RequirementsList";
+import { ClinicList } from "./ClinicList";
+import { RotaView } from "./RotaView";
+import { AdminPage } from "./AdminPage";
 
 export default function App() {
   const [isLoading, setIsLoading] = useState(true);
@@ -88,7 +96,57 @@ export default function App() {
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <AppHeader onSignOut={handleSignOut} />
       <main className="container mx-auto p-4 pt-16 flex-grow">
-        <Home isAdmin={currentUser?.isAdmin ?? false} userEmail={currentUser?.email ?? ''} />
+        <Routes>
+          <Route 
+            path="/" 
+            element={
+              currentUser?.isAdmin ? (
+                <RotaTypeSelector />
+              ) : (
+                <Navigate to="/pharmacist" replace />
+              )
+            } 
+          />
+          <Route 
+            path="/pharmacist/*" 
+            element={
+              <Home isAdmin={currentUser?.isAdmin ?? false} userEmail={currentUser?.email ?? ''} />
+            } 
+          />
+          <Route 
+            path="/technician" 
+            element={
+              <TechnicianHome isAdmin={currentUser?.isAdmin ?? false} userEmail={currentUser?.email ?? ''} />
+            } 
+          />
+          {/* Admin Routes - only accessible to admins */}
+          {currentUser?.isAdmin && (
+            <>
+              <Route 
+                path="/pharmacists" 
+                element={<PharmacistList />} 
+              />
+              <Route 
+                path="/requirements" 
+                element={
+                  <div className="flex flex-col gap-8 w-full">
+                    <ClinicList />
+                    <RequirementsList />
+                  </div>
+                } 
+              />
+              <Route 
+                path="/create-rota" 
+                element={<RotaView isAdmin={true} />} 
+              />
+              <Route 
+                path="/admin" 
+                element={<AdminPage />} 
+              />
+            </>
+          )}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
       </main>
     </div>
   );
