@@ -7,6 +7,7 @@ import { parseISO } from 'date-fns'; // Added parseISO import
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import { TechnicianSelectionModal } from "./TechnicianSelectionModal";
+import { TechnicianReplacementModal } from "./TechnicianReplacementModal"; // Added import
 import { TechnicianRotaTableView } from "./TechnicianRotaTableView";
 
 // Add type declarations for custom properties on the window object
@@ -93,6 +94,7 @@ export function TechnicianRotaView({
   const convex = useConvex();
   const saveRotaConfiguration = useMutation(api.technicianRotas.saveRotaConfiguration);
   const updateRotaAssignment = useMutation(api.technicianRotas.updateRotaAssignment);
+  const updateMultipleAssignments = useMutation(api.technicianRotas.updateMultipleAssignments);
   
   const [selectedClinicIds, setSelectedClinicIds] = useState<Array<Id<"clinics">>>([]);
   const [selectedTechnicianIds, setSelectedTechnicianIds] = useState<Array<Id<"technicians">>>(() => {
@@ -101,6 +103,9 @@ export function TechnicianRotaView({
   });
   
   const [techniciansConfirmed, setTechniciansConfirmed] = useState(false);
+  
+  // Initialize rotaIdsByDate state from props
+  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"technicianRotas">>>(initialRotaIdsByDate || {});
   
   // Track additional requirements and clinics that need to be fulfilled
   const [additionalRequirements, setAdditionalRequirements] = useState<Array<{
@@ -137,7 +142,756 @@ export function TechnicianRotaView({
   const [isPublishing, setIsPublishing] = useState(false);
   const [hasExistingConfig, setHasExistingConfig] = useState(false);
   const [publishSuccess, setPublishSuccess] = useState(false);
+
+  // State for manual editing
+  const [selectedTechnicianCell, setSelectedTechnicianCell] = useState<{
+    rotaId: Id<"technicianRotas">;
+    assignmentId?: Id<"technicianRotas">; // Or the specific ID type for an assignment if it's different
+    assignmentIndex?: number;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    currentTechnicianId: Id<"technicians"> | null;
+    otherTechnicianIds?: Array<Id<"technicians">>;
+  } | null>(null);
+  const [showTechnicianReplacementModal, setShowTechnicianReplacementModal] = useState(false); // Renamed
+  const [draggedTechnicianInfo, setDraggedTechnicianInfo] = useState<{
+    technicianId: Id<"technicians">;
+    assignment: any; // Consider a more specific type for technician assignment
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  } | null>(null);
+  const [dropTargetTechnicianCellInfo, setDropTargetTechnicianCellInfo] = useState<{
+    technicianId: Id<"technicians"> | null;
+    assignment: any | null; // Consider a more specific type
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  } | null>(null);
   
+  // State to track drag modifiers (e.g., Shift key for full-day swaps)
+  const [dragState, setDragState] = useState({
+    shiftKeyPressed: false
+  });
+
+  // Handler for when a technician assignment cell is clicked in the table
+  const handleTechnicianCellClick = useCallback((details: {
+    assignment: any; // Should conform to the updated Assignment type with _id and rotaId
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => {
+    if (effectiveViewOnly) return;
+
+    console.log("Cell clicked details:", details);
+    console.log("Current rotaIdsByDate:", rotaIdsByDate);
+    
+    // First, try to get the rotaId directly from the assignment if it exists
+    let rotaId = details.assignment.rotaId;
+    
+    // If not available in the assignment, try to get it from rotaIdsByDate
+    if (!rotaId) {
+      const clickedDate = details.date;
+      rotaId = rotaIdsByDate[clickedDate];
+      
+      // If still not found, check if it's in the published rota
+      if (!rotaId && publishedRota && publishedRota.date === clickedDate) {
+        rotaId = publishedRota._id;
+      }
+      
+      // If still not found, try to find the closest date's rotaId
+      if (!rotaId) {
+        console.log(`No direct rotaId found for date ${clickedDate}, looking for closest date`);
+        
+        // Get all dates that have rotaIds
+        const availableDates = Object.keys(rotaIdsByDate).sort();
+        if (availableDates.length > 0) {
+          // Find the closest date (this is a simple approach - you might want to improve it)
+          const closestDate = availableDates[0]; // Default to first date
+          rotaId = rotaIdsByDate[closestDate];
+          console.log(`Using rotaId from closest date ${closestDate}`);
+        } else if (Object.keys(rotaIdsByDate).length === 0) {
+          // If rotaIdsByDate is empty, we might need to create rota documents first
+          console.error("No rota documents exist yet. Please generate the rota first.");
+          alert("Please generate the rota first. This will create draft records that can be edited.");
+          return;
+        }
+      }
+    }
+    
+    if (!rotaId) {
+      console.error(`Could not find a valid rotaId for this assignment`);
+      return;
+    }
+    
+    // For empty cells or unassigned slots, we might want to handle differently
+    // For now, we'll just show the replacement modal for all cells
+    const assignmentId = details.assignment._id;
+    const currentTechnicianId = details.assignment.technicianId;
+
+    // If this is an empty cell or unassigned slot
+    if (!currentTechnicianId || currentTechnicianId === '') {
+      console.log("Clicked on empty/unassigned cell:", details);
+      // TODO: Implement logic for adding a new assignment to an empty cell
+      // For now, we'll just show the replacement modal
+    }
+
+    setSelectedTechnicianCell({
+      rotaId: rotaId as Id<"technicianRotas">, // Use the found rotaId
+      assignmentId: assignmentId as Id<"technicianRotas">, // Assuming assignment ID is also this type, adjust if different
+      location: details.location,
+      date: details.date,
+      startTime: details.startTime,
+      endTime: details.endTime,
+      currentTechnicianId: currentTechnicianId as Id<"technicians"> || null, // Cast to Id type, allow null for empty cells
+    });
+    setShowTechnicianReplacementModal(true);
+  }, [effectiveViewOnly, rotaIdsByDate, publishedRota]);
+  
+  // Handler for when a technician cell drag starts
+  const handleDragStart = useCallback((details: {
+    assignment: any;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => {
+    if (effectiveViewOnly) return;
+    
+    const { assignment, location, date, startTime, endTime } = details;
+    if (!assignment.technicianId) return; // Only allow dragging cells with technicians
+    
+    console.log("Drag started:", details);
+    
+    setDraggedTechnicianInfo({
+      technicianId: assignment.technicianId as Id<"technicians">,
+      assignment,
+      location,
+      date,
+      startTime,
+      endTime
+    });
+  }, [effectiveViewOnly]);
+  
+  // Handler for when a drag is over a potential drop target
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (effectiveViewOnly) return;
+    e.preventDefault(); // Necessary to allow dropping
+  }, [effectiveViewOnly]);
+  
+  // Handler for when a drag enters a potential drop target
+  const handleDragEnter = useCallback((details: {
+    assignment: any | null;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => {
+    if (effectiveViewOnly) return;
+    
+    const { assignment, location, date, startTime, endTime } = details;
+    console.log("Drag entered:", details);
+    
+    setDropTargetTechnicianCellInfo({
+      technicianId: assignment?.technicianId as Id<"technicians"> || null,
+      assignment,
+      location,
+      date,
+      startTime,
+      endTime
+    });
+  }, [effectiveViewOnly]);
+  
+  // Handler for when a drag leaves a potential drop target
+  const handleDragLeave = useCallback(() => {
+    if (effectiveViewOnly) return;
+    
+    // Optionally clear the drop target info or keep it for visual feedback
+    // setDropTargetTechnicianCellInfo(null);
+  }, [effectiveViewOnly]);
+  
+  // Handler for when a technician is dropped on a target cell
+  const handleDrop = useCallback(async (details: {
+    assignment: any | null;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => {
+    if (effectiveViewOnly || !draggedTechnicianInfo) return;
+    
+    const { assignment: targetAssignment, location, date, startTime, endTime } = details;
+    console.log("Drop target:", details);
+    console.log("Dragged source:", draggedTechnicianInfo);
+    
+    // If dropping on the same cell, do nothing
+    if (draggedTechnicianInfo.location === location && 
+        draggedTechnicianInfo.date === date && 
+        draggedTechnicianInfo.startTime === startTime && 
+        draggedTechnicianInfo.technicianId === targetAssignment?.technicianId) {
+      console.log("Dropped on the same cell, no action needed");
+      setDraggedTechnicianInfo(null);
+      setDropTargetTechnicianCellInfo(null);
+      return;
+    }
+    
+    // Make full-day swaps the default behavior
+    // Hold Shift key for slot-level swaps (reverse the logic)
+    const isSlotSwap = dragState.shiftKeyPressed;
+    const swapScope = isSlotSwap ? "slot" : "day";
+    
+    console.log(`Swap scope: ${swapScope} (${isSlotSwap ? "Slot-level swap" : "Full-day swap"})`);
+    
+    if (isSlotSwap) {
+      console.log("SLOT SWAP DETECTED - Shift key is pressed");
+    } else {
+      console.log("FULL DAY SWAP - Default behavior");
+    }
+    
+    // Swap technicians between the two cells
+    try {
+      await swapTechnicians(
+        draggedTechnicianInfo.assignment,
+        targetAssignment,
+        draggedTechnicianInfo.location,
+        location,
+        draggedTechnicianInfo.date,
+        date,
+        draggedTechnicianInfo.startTime,
+        startTime,
+        swapScope
+      );
+      console.log(`Technicians swapped successfully with scope: ${swapScope}`);
+    } catch (error) {
+      console.error("Error swapping technicians:", error);
+    }
+    
+    // Clear drag and drop state
+    setDraggedTechnicianInfo(null);
+    setDropTargetTechnicianCellInfo(null);
+  }, [effectiveViewOnly, draggedTechnicianInfo]);
+  
+  // Function to swap technicians between two assignments
+  const swapTechnicians = async (
+    sourceAssignment: any,
+    targetAssignment: any | null,
+    sourceLocation: string,
+    targetLocation: string,
+    sourceDate: string,
+    targetDate: string,
+    sourceStartTime: string,
+    targetStartTime: string,
+    scope: "slot" | "day" = "slot" // Default to slot for backward compatibility
+  ) => {
+    if (!sourceAssignment?.technicianId) {
+      console.error("Source assignment has no technician");
+      return;
+    }
+    
+    const sourceTechnicianId = sourceAssignment.technicianId as Id<"technicians">;
+    const targetTechnicianId = targetAssignment?.technicianId as Id<"technicians"> || null;
+    const sourceRotaId = sourceAssignment.rotaId as Id<"technicianRotas">;
+    const targetRotaId = targetAssignment?.rotaId as Id<"technicianRotas"> || sourceRotaId; // Use source rota ID if target has none
+    
+    console.log(`Swapping technicians: ${sourceTechnicianId} -> ${targetTechnicianId || 'empty'} and ${targetTechnicianId || 'empty'} -> ${sourceTechnicianId}`);
+    console.log(`Swap scope: ${scope}`);
+    
+    // Handle different swap scopes
+    try {
+      let sourceResult;
+      
+      // For full-day swaps, use updateMultipleAssignments
+      if (scope === "day") {
+        console.log(`Performing full-day swap for date ${sourceDate}`);
+        
+        // Get the rota IDs for the source and target dates
+        const sourceRotaIdFromDate = rotaIdsByDate[sourceDate];
+        const targetRotaIdFromDate = rotaIdsByDate[targetDate];
+        
+        if (!sourceRotaIdFromDate) {
+          throw new Error(`No rota ID found for source date ${sourceDate}`);
+        }
+        
+        if (!targetRotaIdFromDate && targetDate !== sourceDate) {
+          throw new Error(`No rota ID found for target date ${targetDate}`);
+        }
+        
+        // For the source technician: replace with target technician for the whole day at the source location
+        sourceResult = await updateMultipleAssignments({
+          rotaIdsByDate: { [sourceDate]: sourceRotaIdFromDate },
+          location: sourceLocation, // Only update assignments for this location
+          date: sourceDate,
+          originalTechnicianId: sourceTechnicianId,
+          newTechnicianId: targetTechnicianId || sourceTechnicianId, // If target is empty, keep source technician
+          scope: "day",
+          respectEAU: true // Respect EAU special rules
+        });
+      } else {
+        // For slot-level swaps, use the original updateRotaAssignment
+        sourceResult = await updateRotaAssignment({
+          rotaId: sourceRotaId,
+          location: sourceLocation,
+          startTime: sourceStartTime,
+          originalTechnicianId: sourceTechnicianId,
+          newTechnicianId: targetTechnicianId || sourceTechnicianId, // If target is empty, keep source technician
+        });
+      }
+      
+      console.log("Source assignment updated:", sourceResult);
+      
+      // Update local state for source assignment
+      if (sourceResult && sourceResult.success) {
+        setRotaAssignments(prevAssignments => {
+          return prevAssignments.map(assignment => {
+            // For full-day swaps, update all assignments for this technician at this location on this date
+            if (scope === "day" && 
+                assignment.location === sourceLocation && 
+                assignment.date === sourceDate && 
+                assignment.technicianId === sourceTechnicianId) {
+              
+              console.log(`Updating full-day source assignment in local state: ${JSON.stringify(assignment)}`);
+              return {
+                ...assignment,
+                technicianId: targetTechnicianId || sourceTechnicianId
+              };
+            }
+            // For slot-level swaps, use the original logic
+            else if (scope === "slot" && 
+                     assignment.location === sourceLocation && 
+                     assignment.date === sourceDate && 
+                     assignment.technicianId === sourceTechnicianId) {
+              
+              // For afternoon slots (13:00-17:00)
+              if (sourceStartTime === "13:00") {
+                if (assignment.startTime === "13:00") {
+                  console.log(`Updating afternoon source assignment in local state: ${JSON.stringify(assignment)}`);
+                  return {
+                    ...assignment,
+                    technicianId: targetTechnicianId || sourceTechnicianId
+                  };
+                }
+              } 
+              // For morning slots (09:00-13:00)
+              else if (sourceStartTime === "09:00") {
+                if (assignment.startTime === "09:00" && 
+                    (assignment.endTime === "13:00" || assignment.endTime === undefined)) {
+                  console.log(`Updating morning source assignment in local state: ${JSON.stringify(assignment)}`);
+                  return {
+                    ...assignment,
+                    technicianId: targetTechnicianId || sourceTechnicianId
+                  };
+                }
+              }
+              // For any other time slots
+              else if (assignment.startTime === sourceStartTime) {
+                return {
+                  ...assignment,
+                  technicianId: targetTechnicianId || sourceTechnicianId
+                };
+              }
+            }
+            return assignment;
+          });
+        });
+      }
+      // If target has a technician, update the target assignment
+      if (targetTechnicianId) {
+        let targetResult;
+        
+        // For full-day swaps, use updateMultipleAssignments
+        if (scope === "day") {
+          console.log(`Performing full-day swap for target date ${targetDate}`);
+          
+          // Get the rota ID for the target date
+          const targetRotaIdFromDate = rotaIdsByDate[targetDate];
+          
+          if (!targetRotaIdFromDate) {
+            throw new Error(`No rota ID found for target date ${targetDate}`);
+          }
+          
+          // For the target technician: replace with source technician for the whole day at the target location
+          targetResult = await updateMultipleAssignments({
+            rotaIdsByDate: { [targetDate]: targetRotaIdFromDate },
+            location: targetLocation, // Only update assignments for this location
+            date: targetDate,
+            originalTechnicianId: targetTechnicianId,
+            newTechnicianId: sourceTechnicianId,
+            scope: "day",
+            respectEAU: true // Respect EAU special rules
+          });
+        } else {
+          // For slot-level swaps, use the original updateRotaAssignment
+          targetResult = await updateRotaAssignment({
+            rotaId: targetRotaId,
+            location: targetLocation,
+            startTime: targetStartTime,
+            originalTechnicianId: targetTechnicianId,
+            newTechnicianId: sourceTechnicianId,
+          });
+        }
+        
+        console.log("Target assignment updated:", targetResult);
+        
+        // Update local state for target assignment
+        if (targetResult && targetResult.success) {
+          setRotaAssignments(prevAssignments => {
+            return prevAssignments.map(assignment => {
+              // For full-day swaps, update all assignments for this technician at this location on this date
+              if (scope === "day" && 
+                  assignment.location === targetLocation && 
+                  assignment.date === targetDate && 
+                  assignment.technicianId === targetTechnicianId) {
+                
+                console.log(`Updating full-day target assignment in local state: ${JSON.stringify(assignment)}`);
+                return {
+                  ...assignment,
+                  technicianId: sourceTechnicianId
+                };
+              }
+              // For slot-level swaps, use the original logic
+              else if (scope === "slot" && 
+                       assignment.location === targetLocation && 
+                       assignment.date === targetDate && 
+                       assignment.technicianId === targetTechnicianId) {
+                
+                // For afternoon slots (13:00-17:00)
+                if (targetStartTime === "13:00") {
+                  if (assignment.startTime === "13:00") {
+                    console.log(`Updating afternoon target assignment in local state: ${JSON.stringify(assignment)}`);
+                    return {
+                      ...assignment,
+                      technicianId: sourceTechnicianId
+                    };
+                  }
+                } 
+                // For morning slots (09:00-13:00)
+                else if (targetStartTime === "09:00") {
+                  if (assignment.startTime === "09:00" && 
+                      (assignment.endTime === "13:00" || assignment.endTime === undefined)) {
+                    console.log(`Updating morning target assignment in local state: ${JSON.stringify(assignment)}`);
+                    return {
+                      ...assignment,
+                      technicianId: sourceTechnicianId
+                    };
+                  }
+                }
+                // For any other time slots
+                else if (assignment.startTime === targetStartTime) {
+                  return {
+                    ...assignment,
+                    technicianId: sourceTechnicianId
+                  };
+                }
+              }
+              return assignment;
+            });
+          });
+        }
+      }
+      
+      // In a real implementation, you might want to modify the mutation to handle this case directly
+      if (!targetTechnicianId) {
+        // TODO: Implement logic to remove a technician from an assignment
+        // For now, we'll just log it
+        console.log("Target was empty, source technician should be removed (not implemented yet)");
+      }
+      
+      return true;
+    } catch (error) {
+      console.error("Error in swapTechnicians:", error);
+      throw error;
+    }
+  };
+
+  // Handler for when a new technician is selected in the replacement modal
+  const handleTechnicianReplacementSelect = useCallback(async (newTechnicianId: Id<"technicians">, scope: "slot" | "day" | "week") => {
+    if (!selectedTechnicianCell) {
+      console.error("No technician cell selected for replacement.");
+      return;
+    }
+
+    const { rotaId, location, date, startTime, endTime, currentTechnicianId: originalTechnicianId, assignmentId } = selectedTechnicianCell;
+
+    if (!originalTechnicianId) {
+      console.error("Original technician ID is missing from selected cell.");
+      // This might happen if trying to replace an 'Unassigned' slot, which should be handled by a different logic (e.g., add new assignment)
+      // For now, we assume replacement is for an existing technician.
+      setShowTechnicianReplacementModal(false);
+      setSelectedTechnicianCell(null);
+      return;
+    }
+
+    // Get a valid rotaId - either from the selectedTechnicianCell or find one
+    let effectiveRotaId = rotaId;
+    
+    if (!effectiveRotaId) {
+      console.log("Rota ID is missing from selected cell, attempting to find one.");
+      console.log("Selected cell details:", selectedTechnicianCell);
+      console.log("Available rotaIdsByDate:", rotaIdsByDate);
+      
+      // First try to get it from rotaIdsByDate using the date
+      if (date) {
+        effectiveRotaId = rotaIdsByDate[date];
+      }
+      
+      // If still not found, check if it's in the published rota
+      if (!effectiveRotaId && publishedRota && publishedRota.date === date) {
+        effectiveRotaId = publishedRota._id;
+      }
+      
+      // If still not found, try to find any rotaId
+      if (!effectiveRotaId) {
+        const availableDates = Object.keys(rotaIdsByDate).sort();
+        if (availableDates.length > 0) {
+          // Use the first available rotaId
+          const firstDate = availableDates[0];
+          effectiveRotaId = rotaIdsByDate[firstDate];
+          console.log(`Using rotaId from date ${firstDate} as fallback`);
+        }
+      }
+      
+      if (!effectiveRotaId) {
+        console.error("Could not find any valid rotaId to use for the update.");
+        setShowTechnicianReplacementModal(false);
+        setSelectedTechnicianCell(null);
+        return;
+      }
+    }
+
+    console.log(`Attempting to replace technician for Rota ID: ${effectiveRotaId}, Assignment ID (from cell): ${assignmentId}`);
+    console.log(`  Original Technician ID: ${originalTechnicianId}`);
+    console.log(`  New Technician ID: ${newTechnicianId}`);
+    console.log(`  Scope of replacement: ${scope}`);
+    console.log(`  Cell details: Location: ${location}, Date: ${date}, StartTime: ${startTime}`);
+
+    try {
+      if (scope === "slot") {
+        console.log(`Making slot mutation call with rotaId: ${effectiveRotaId}`);
+        const result = await updateRotaAssignment({
+          rotaId: effectiveRotaId,
+          location,
+          startTime,
+          endTime,
+          originalTechnicianId,
+          newTechnicianId,
+        });
+        
+        if (result && result.success) {
+          console.log("Technician replacement successful for slot:", result);
+          
+          // Update the local state to reflect the change
+          setRotaAssignments(prevAssignments => {
+            // First, check if we need to handle a specific half-day slot
+            let found = false;
+            let updatedAssignments = prevAssignments.map(assignment => {
+              // For precise matching of half-day slots
+              if (assignment.location === location && 
+                  assignment.date === date && 
+                  assignment.startTime === startTime &&
+                  assignment.endTime === endTime &&
+                  assignment.technicianId === originalTechnicianId) {
+                
+                console.log(`Found exact match for ${startTime}-${endTime} assignment: ${JSON.stringify(assignment)}`);
+                found = true;
+                return {
+                  ...assignment,
+                  technicianId: newTechnicianId
+                };
+              }
+              return assignment;
+            });
+            
+            // If we didn't find an exact match, it might be a full-day assignment that was split on the server
+            if (!found) {
+              console.log(`No exact match found in UI state, looking for full-day assignment`);
+              
+              // Check if there's a full-day assignment that needs to be updated in the UI
+              const fullDayAssignmentIndex = prevAssignments.findIndex(a => 
+                a.location === location && 
+                a.date === date && 
+                a.startTime === "09:00" && 
+                (a.endTime === "17:00" || a.endTime === undefined) && 
+                a.technicianId === originalTechnicianId
+              );
+              
+              if (fullDayAssignmentIndex !== -1) {
+                console.log(`Found full-day assignment in UI that was likely split on server`);
+                const fullDayAssignment = prevAssignments[fullDayAssignmentIndex];
+                
+                // Remove the full-day assignment
+                updatedAssignments = [
+                  ...updatedAssignments.slice(0, fullDayAssignmentIndex),
+                  ...updatedAssignments.slice(fullDayAssignmentIndex + 1)
+                ];
+                
+                // Create morning assignment (9:00-13:00)
+                const morningAssignment = {
+                  ...fullDayAssignment,
+                  startTime: "09:00",
+                  endTime: "13:00",
+                  technicianId: startTime === "09:00" ? newTechnicianId : fullDayAssignment.technicianId
+                };
+                
+                // Create afternoon assignment (13:00-17:00)
+                const afternoonAssignment = {
+                  ...fullDayAssignment,
+                  startTime: "13:00",
+                  endTime: "17:00",
+                  technicianId: startTime === "13:00" ? newTechnicianId : fullDayAssignment.technicianId
+                };
+                
+                // Add both half-day assignments
+                updatedAssignments.push(morningAssignment, afternoonAssignment);
+                console.log(`Split into half-day assignments in UI: Morning: ${JSON.stringify(morningAssignment)}, Afternoon: ${JSON.stringify(afternoonAssignment)}`);
+              } else {
+                // If we're still not finding a match, try a more general search for the assignment
+                console.log(`No full-day assignment found, trying a more general search`);
+                
+                // For morning slots (09:00), only update morning assignments
+                if (startTime === "09:00") {
+                  updatedAssignments = updatedAssignments.map(assignment => {
+                    if (assignment.location === location && 
+                        assignment.date === date && 
+                        assignment.startTime === "09:00" &&
+                        assignment.technicianId === originalTechnicianId) {
+                      
+                      console.log(`Found morning assignment to update: ${JSON.stringify(assignment)}`);
+                      return {
+                        ...assignment,
+                        endTime: "13:00", // Ensure it's marked as a morning slot
+                        technicianId: newTechnicianId
+                      };
+                    }
+                    return assignment;
+                  });
+                }
+                // For afternoon slots (13:00), only update afternoon assignments
+                else if (startTime === "13:00") {
+                  updatedAssignments = updatedAssignments.map(assignment => {
+                    if (assignment.location === location && 
+                        assignment.date === date && 
+                        assignment.startTime === "13:00" &&
+                        assignment.technicianId === originalTechnicianId) {
+                      
+                      console.log(`Found afternoon assignment to update: ${JSON.stringify(assignment)}`);
+                      return {
+                        ...assignment,
+                        startTime: "13:00",
+                        endTime: "17:00", // Ensure it's marked as an afternoon slot
+                        technicianId: newTechnicianId
+                      };
+                    }
+                    return assignment;
+                  });
+                }
+              }
+            }
+            
+            return updatedAssignments;
+          });
+        } else {
+          console.warn("Technician replacement for slot might have failed or no assignment was updated:", result);
+          // TODO: Provide user feedback for failure
+        }
+      } 
+      // Handle day scope - replace all assignments for this technician on this day
+      else if (scope === "day") {
+        console.log(`Making day-scope mutation call for date: ${date}`);
+        
+        // For day scope, we need to update all assignments for this technician on this date
+        const result = await updateMultipleAssignments({
+          rotaIdsByDate: { [date]: effectiveRotaId },
+          location, // Optional - if provided, only update assignments for this location
+          date,
+          originalTechnicianId,
+          newTechnicianId,
+          scope: "day",
+          respectEAU: true // Respect EAU special rules
+        });
+        
+        if (result && result.success) {
+          console.log("Technician replacement successful for day:", result);
+          
+          // Update the local state to reflect all changes for this day
+          setRotaAssignments(prevAssignments => {
+            return prevAssignments.map(assignment => {
+              // Match all assignments for this technician on this day
+              // If location is provided, only update assignments for that location
+              if (assignment.date === date && 
+                  assignment.technicianId === originalTechnicianId &&
+                  (!location || assignment.location === location)) {
+                
+                console.log(`Updating assignment for day scope: ${JSON.stringify(assignment)}`);
+                return {
+                  ...assignment,
+                  technicianId: newTechnicianId
+                };
+              }
+              return assignment;
+            });
+          });
+        } else {
+          console.warn("Technician replacement for day might have failed:", result);
+          // TODO: Provide user feedback for failure
+        }
+      }
+      // Handle week scope - replace all assignments for this technician across the week
+      else if (scope === "week") {
+        console.log(`Making week-scope mutation call for week starting: ${date}`);
+        
+        // For week scope, we need to update all assignments for this technician across all days
+        const result = await updateMultipleAssignments({
+          rotaIdsByDate,
+          location, // Optional - if provided, only update assignments for this location
+          date, // Still need to provide a date for reference
+          originalTechnicianId,
+          newTechnicianId,
+          scope: "week",
+          respectEAU: true // Respect EAU special rules
+        });
+        
+        if (result && result.success) {
+          console.log("Technician replacement successful for week:", result);
+          
+          // Update the local state to reflect all changes across the week
+          setRotaAssignments(prevAssignments => {
+            return prevAssignments.map(assignment => {
+              // Match all assignments for this technician across all days
+              // If location is provided, only update assignments for that location
+              if (assignment.technicianId === originalTechnicianId &&
+                  (!location || assignment.location === location)) {
+                
+                console.log(`Updating assignment for week scope: ${JSON.stringify(assignment)}`);
+                return {
+                  ...assignment,
+                  technicianId: newTechnicianId
+                };
+              }
+              return assignment;
+            });
+          });
+        } else {
+          console.warn("Technician replacement for week might have failed:", result);
+          // TODO: Provide user feedback for failure
+        }
+      } else {
+        console.warn(`Unknown scope "${scope}" for technician replacement.`);
+      }
+    } catch (error) {
+      console.error(`Error updating technician assignment for ${scope}:`, error);
+      // TODO: Provide user feedback for error
+    }
+
+    // Close modal and clear selection after handling
+    setShowTechnicianReplacementModal(false);
+    setSelectedTechnicianCell(null);
+  }, [selectedTechnicianCell, updateRotaAssignment, rotaIdsByDate, publishedRota]); // Added updateRotaAssignment to dependency array if it's used directly
+
   // Helper function to get day index (0=Monday, 1=Tuesday, etc.)
   const getDayIndex = useCallback((dayName: string): number => {
     const dayMap: Record<string, number> = {
@@ -345,7 +1099,7 @@ export function TechnicianRotaView({
     }
   };
 
-  // Update currentUser whenever localStorage changes
+  // Effect to handle user info changes from localStorage
   useEffect(() => {
     const handleStorageChange = () => {
       const storedUser = localStorage.getItem('user');
@@ -362,14 +1116,38 @@ export function TechnicianRotaView({
     return () => window.removeEventListener('storage', handleStorageChange);
   }, []);
   
+  // Effect to track keyboard modifiers for drag and drop operations
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setDragState(prev => ({ ...prev, shiftKeyPressed: true }));
+        console.log('Shift key pressed - Single slot swap mode enabled');
+      }
+    };
+    
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Shift') {
+        setDragState(prev => ({ ...prev, shiftKeyPressed: false }));
+        console.log('Shift key released - Full day swap mode (default)');
+      }
+    };
+    
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
+  
   // State variables
   const [freeCellText, setFreeCellText] = useState<Record<string, string>>({});
   const [technicianWorkingDays, setTechnicianWorkingDays] = useState<Record<string, string[]>>({});
   const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
   const [selectedTechnicianForReport, setSelectedTechnicianForReport] = useState<Id<"technicians"> | null>(null);
   const [showTechnicianReport, setShowTechnicianReport] = useState(false);
-  // Using string type for now until technicianRotas is implemented in the database
-  const [rotaIdsByDate, setRotaIdsByDate] = useState<Record<string, Id<"technicianRotas">>>(initialRotaIdsByDate || {});
+  // rotaIdsByDate is already declared at the top of the component
   const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
   const [weekdaysConfirmed, setWeekdaysConfirmed] = useState<boolean>(false);
   
@@ -781,8 +1559,8 @@ export function TechnicianRotaView({
     return '2020-01-06';
   };
 
-  // Handle date change - ensures only Mondays can be selected
-  const handleDateChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle date change - ensures only Mondays can be selected and loads draft rotas if available
+  const handleDateChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedDate = e.target.value;
     const date = new Date(selectedDate);
     
@@ -794,7 +1572,62 @@ export function TechnicianRotaView({
       return;
     }
     
+    // Set the selected Monday date
     setSelectedMonday(selectedDate);
+    
+    // Check for existing draft rotas for this week
+    if (!effectiveViewOnly) {
+      try {
+        console.log('Checking for draft rotas for week starting:', selectedDate);
+        const draftRotaData = await convex.query(api.technicianRotas.getDraftRotasForWeek, {
+          weekStartDate: selectedDate
+        });
+        
+        if (draftRotaData && 
+            (Object.keys(draftRotaData.rotaIdsByDate).length > 0 || 
+             draftRotaData.assignments.length > 0)) {
+          console.log('Found draft rotas for selected week:', draftRotaData);
+          setRotaIdsByDate(draftRotaData.rotaIdsByDate);
+          setRotaAssignments(draftRotaData.assignments);
+          setRotaGenerated(true);
+          
+          // Show notification to user
+          const notification = document.createElement('div');
+          notification.className = 'fixed bottom-4 right-4 bg-blue-100 border-l-4 border-blue-500 text-blue-700 p-4 rounded shadow-lg';
+          notification.style.zIndex = '9999';
+          notification.innerHTML = `
+            <div class="flex items-center">
+              <div class="py-1"><svg class="fill-current h-6 w-6 text-blue-500 mr-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M2.93 17.07A10 10 0 1 1 17.07 2.93 10 10 0 0 1 2.93 17.07zm12.73-1.41A8 8 0 1 0 4.34 4.34a8 8 0 0 0 11.32 11.32zM9 11V9h2v6H9v-4zm0-6h2v2H9V5z"/></svg></div>
+              <div>
+                <p class="font-bold">Most recent draft rota loaded</p>
+                <p class="text-sm">The most recent draft rota for this week has been loaded. You can edit it or click 'Create Rota' to generate a new one.</p>
+              </div>
+              <div class="ml-4">
+                <button id="close-notification" class="text-blue-500 hover:text-blue-700">×</button>
+              </div>
+            </div>
+          `;
+          document.body.appendChild(notification);
+          
+          // Remove notification after 5 seconds or when close button is clicked
+          setTimeout(() => {
+            if (document.body.contains(notification)) {
+              document.body.removeChild(notification);
+            }
+          }, 5000);
+          
+          document.getElementById('close-notification')?.addEventListener('click', () => {
+            if (document.body.contains(notification)) {
+              document.body.removeChild(notification);
+            }
+          });
+        } else {
+          console.log('No draft rotas found for selected week');
+        }
+      } catch (error) {
+        console.error('Error fetching draft rotas:', error);
+      }
+    }
   };
   
   // Get the minimum date for the date picker (next Monday)
@@ -882,6 +1715,17 @@ const generateWeeklyTechnicianRota = async () => {
   }
 
   setGeneratingWeekly(true);
+  
+  try {
+    // Clear any existing draft rotas for this week before generating new ones
+    console.log('Clearing existing draft rotas for week starting:', selectedMonday);
+    await convex.mutation(api.technicianRotas.clearDraftRotasForWeek, {
+      weekStartDate: selectedMonday
+    });
+  } catch (error) {
+    console.error('Error clearing existing draft rotas:', error);
+    // Continue with generation even if clearing fails
+  }
 
   try {
     // Create a map of technician IDs to their working days
@@ -1610,15 +2454,16 @@ const generateWeeklyTechnicianRota = async () => {
                                  'Unassigned'
                 }))} 
                 startDate={selectedMonday} 
+                isViewOnly={!isAdmin} // Set to false for admin users to enable interactivity
+                onTechnicianAssignmentClick={handleTechnicianCellClick}
+                onDragStart={handleDragStart}
+                onDragOver={handleDragOver}
+                onDragEnter={handleDragEnter}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
               />
             </div>
           )}
-        </div>
-      )}
-      
-      {selectedMonday && technicianRequirements.length === 0 && (
-        <div className="text-center py-10 text-gray-500">
-          No technician requirements found. Please add requirements in the Requirements section.
         </div>
       )}
       
@@ -1639,6 +2484,32 @@ const generateWeeklyTechnicianRota = async () => {
           }}
           selectedTechnicianIds={selectedTechnicianIds}
         />
+      )}
+      
+      {/* Add the TechnicianReplacementModal */}
+      {showTechnicianReplacementModal && selectedTechnicianCell && (
+        <TechnicianReplacementModal
+          isOpen={showTechnicianReplacementModal}
+          onClose={() => {
+            setShowTechnicianReplacementModal(false);
+            setSelectedTechnicianCell(null);
+          }}
+          onSelect={handleTechnicianReplacementSelect} // Pass the handler
+          currentTechnicianId={selectedTechnicianCell.currentTechnicianId}
+          location={selectedTechnicianCell.location}
+          date={selectedTechnicianCell.date}
+          time={`${selectedTechnicianCell.startTime}-${selectedTechnicianCell.endTime}`}
+        />
+      )}
+      
+      {/* Visual indicator for slot-level swap mode */}
+      {dragState.shiftKeyPressed && draggedTechnicianInfo && (
+        <div className="fixed bottom-4 right-4 bg-green-600 text-white px-4 py-2 rounded-lg shadow-lg z-50 flex items-center">
+          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2" viewBox="0 0 20 20" fill="currentColor">
+            <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v3.586L7.707 9.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 10.586V7z" clipRule="evenodd" />
+          </svg>
+          <span className="font-bold">SINGLE SLOT SWAP MODE</span>
+        </div>
       )}
     </div>
   );

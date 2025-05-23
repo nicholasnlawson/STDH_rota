@@ -848,7 +848,7 @@ export const generateTechnicianRota = internalMutation({
         // Check if we've already assigned the needed number of technicians
         const currentAssignments = requirementAssignments.get(primaryWard) || [];
         if (currentAssignments.length >= requirement.minTechnicians) {
-          console.log(`[generateTechnicianRota] PASS 1C: Requirement ${primaryWard} already has minimum technicians assigned (${currentAssignments.length}/${requirement.minTechnicians})`);
+          console.log(`[generateTechnicianRota] PASS 1C: Requirement ${primaryWard} already has enough technicians (${currentAssignments.length}/${requirement.minTechnicians})`);
           continue;
         }
         
@@ -1844,6 +1844,44 @@ export const generateTechnicianRota = internalMutation({
   }
 });
 
+// Clear draft rotas for a week
+export const clearDraftRotasForWeek = mutation({
+  args: {
+    weekStartDate: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { weekStartDate } = args;
+    console.log(`[clearDraftRotasForWeek] Clearing draft rotas for week starting ${weekStartDate}`);
+    
+    // Calculate the end date (6 days after start date)
+    const startDate = new Date(weekStartDate);
+    const endDate = new Date(startDate);
+    endDate.setDate(startDate.getDate() + 6);
+    const endDateStr = endDate.toISOString().split('T')[0];
+    
+    // Query for all draft rotas within the date range
+    const rotas = await ctx.db
+      .query("technicianRotas")
+      .filter(q =>
+        q.and(
+          q.eq(q.field("status"), "draft"),
+          q.gte(q.field("date"), weekStartDate),
+          q.lte(q.field("date"), endDateStr)
+        )
+      )
+      .collect();
+    
+    console.log(`[clearDraftRotasForWeek] Found ${rotas.length} draft rotas to delete for week starting ${weekStartDate}`);
+    
+    // Delete each draft rota
+    for (const rota of rotas) {
+      await ctx.db.delete(rota._id);
+    }
+    
+    return { success: true, deletedCount: rotas.length };
+  }
+});
+
 // Generate weekly rota
 export const generateWeeklyRota = mutation({
   args: {
@@ -1925,7 +1963,66 @@ export const generateWeeklyRota = mutation({
     }
     
     console.log('[generateWeeklyRota] All assignments generated:', assignments.length);
-    return { assignments, conflicts };
+    
+    // Save the generated rotas as drafts
+    const rotaIdsByDate: Record<string, Id<"technicianRotas">> = {};
+    
+    // Group assignments by date
+    const assignmentsByDate: Record<string, TechnicianAssignment[]> = {};
+    
+    assignments.forEach(assignment => {
+      const { date, ...assignmentWithoutDate } = assignment;
+      if (!assignmentsByDate[date]) {
+        assignmentsByDate[date] = [];
+      }
+      assignmentsByDate[date].push(assignmentWithoutDate as TechnicianAssignment);
+    });
+    
+    // Save each day's assignments as a draft rota
+    for (const date in assignmentsByDate) {
+      try {
+        // Check if a draft rota already exists for this date
+        const existingRota = await ctx.db
+          .query("technicianRotas")
+          .filter(q =>
+            q.and(
+              q.eq(q.field("date"), date),
+              q.eq(q.field("status"), "draft")
+            )
+          )
+          .first();
+        
+        if (existingRota) {
+          // Update existing draft rota
+          await ctx.db.patch(existingRota._id, {
+            assignments: assignmentsByDate[date],
+            conflicts: conflicts
+          });
+          rotaIdsByDate[date] = existingRota._id;
+          console.log(`[generateWeeklyRota] Updated existing draft rota for ${date}`);
+        } else {
+          // Create new draft rota
+          const rotaId = await ctx.db.insert("technicianRotas", {
+            date,
+            assignments: assignmentsByDate[date],
+            conflicts: conflicts,
+            status: "draft",
+            includedWeekdays: args.selectedWeekdays || [],
+            staffIds: args.technicianIds
+          });
+          rotaIdsByDate[date] = rotaId;
+          console.log(`[generateWeeklyRota] Created new draft rota for ${date}`);
+        }
+      } catch (error) {
+        console.error(`[generateWeeklyRota] Error saving draft rota for ${date}:`, error);
+      }
+    }
+    
+    return { 
+      assignments, 
+      conflicts,
+      rotaIdsByDate
+    };
   }
 });
 
@@ -2014,12 +2111,186 @@ export const saveRotaConfiguration = mutation({
 // Get rota configuration
 export const getRotaConfiguration = query({
   args: {
-    weekStartDate: v.string()
+    weekStartDate: v.string(),
   },
   handler: async (ctx, args) => {
-    return await ctx.db.query("technicianRotaConfigurations")
+    const config = await ctx.db.query("technicianRotaConfigurations")
       .filter(q => q.eq(q.field("weekStartDate"), args.weekStartDate))
       .first();
+    return config;
+  }
+});
+
+// Get draft rotas for a specific week
+export const getDraftRotasForWeek = query({
+  args: {
+    weekStartDate: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { weekStartDate } = args;
+    console.log(`[getDraftRotasForWeek] Finding draft rotas for week starting ${weekStartDate}`);
+    
+    // Calculate the end date (6 days after start date)
+    const startDate = new Date(weekStartDate);
+    const endDate = new Date(startDate);
+    endDate.setDate(startDate.getDate() + 6);
+    const endDateStr = endDate.toISOString().split('T')[0];
+    
+    // Generate all dates in the week
+    const weekDates: string[] = [];
+    for (let i = 0; i <= 6; i++) {
+      const currentDate = new Date(startDate);
+      currentDate.setDate(startDate.getDate() + i);
+      weekDates.push(currentDate.toISOString().split('T')[0]);
+    }
+    
+    const rotaIdsByDate: Record<string, Id<"technicianRotas">> = {};
+    let allAssignments: any[] = [];
+    
+    // For each day of the week, get the most recent draft rota
+    for (const dateStr of weekDates) {
+      // Query for draft rotas for this specific date, ordered by _creationTime descending
+      const rotasForDate = await ctx.db
+        .query("technicianRotas")
+        .filter(q =>
+          q.and(
+            q.eq(q.field("status"), "draft"),
+            q.eq(q.field("date"), dateStr)
+          )
+        )
+        .order("desc")
+        .collect();
+      
+      // If we have any rotas for this date, use the most recent one (first in the array)
+      if (rotasForDate.length > 0) {
+        const mostRecentRota = rotasForDate[0];
+        rotaIdsByDate[dateStr] = mostRecentRota._id;
+        
+        // Add date to each assignment
+        if (mostRecentRota.assignments && Array.isArray(mostRecentRota.assignments)) {
+          const assignmentsWithDate = mostRecentRota.assignments.map((a: any) => ({
+            ...a,
+            date: dateStr
+          }));
+          
+          allAssignments = [...allAssignments, ...assignmentsWithDate];
+        }
+        
+        console.log(`[getDraftRotasForWeek] Found ${rotasForDate.length} drafts for ${dateStr}, using most recent`);
+      }
+    }
+    
+    console.log(`[getDraftRotasForWeek] Found draft rotas for ${Object.keys(rotaIdsByDate).length} days in week starting ${weekStartDate}`);
+    
+    return {
+      rotaIdsByDate,
+      assignments: allAssignments
+    };
+  }
+});
+
+// Update multiple rota assignments (for day or week scope)
+export const updateMultipleAssignments = mutation({
+  args: {
+    rotaIdsByDate: v.record(v.string(), v.id("technicianRotas")),
+    location: v.optional(v.string()),
+    date: v.string(),
+    originalTechnicianId: v.id("technicians"),
+    newTechnicianId: v.id("technicians"),
+    scope: v.union(v.literal("day"), v.literal("week")),
+    respectEAU: v.optional(v.boolean())
+  },
+  handler: async (ctx, args) => {
+    const { rotaIdsByDate, location, date, originalTechnicianId, newTechnicianId, scope, respectEAU = true } = args;
+    
+    // For day scope, we only update assignments for the specific date
+    // For week scope, we update assignments for all dates in the rotaIdsByDate
+    const datesToUpdate = scope === "day" ? [date] : Object.keys(rotaIdsByDate);
+    
+    const results: Record<string, { success: boolean; error?: string; assignmentsUpdated?: number }> = {};
+    
+    for (const currentDate of datesToUpdate) {
+      const rotaId = rotaIdsByDate[currentDate];
+      if (!rotaId) {
+        console.log(`No rota ID found for date ${currentDate}, skipping`);
+        results[currentDate] = { success: false, error: "No rota found" };
+        continue;
+      }
+      
+      const rota = await ctx.db.get(rotaId);
+      if (!rota) {
+        console.log(`Rota with ID ${rotaId} not found for date ${currentDate}`);
+        results[currentDate] = { success: false, error: "Rota not found" };
+        continue;
+      }
+      
+      console.log(`Processing rota for date ${currentDate}, ID: ${rotaId}`);
+      
+      let updatedAssignments = [...rota.assignments];
+      let assignmentsUpdated = 0;
+      
+      // Special handling for Emergency Assessment Unit (EAU) if respectEAU is true
+      if (respectEAU) {
+        // Check if the new technician already has assignments
+        const newTechnicianHasAssignments = updatedAssignments.some(
+          (a: any) => a.technicianId === newTechnicianId && a.location !== "Emergency Assessment Unit"
+        );
+        
+        // Check if any of the assignments we're updating is for EAU
+        const updatingEAU = !location || location === "Emergency Assessment Unit";
+        
+        // If we're assigning to EAU and the technician already has other assignments, don't allow it
+        if (updatingEAU && newTechnicianHasAssignments) {
+          console.log(`Cannot assign technician ${newTechnicianId} to EAU as they already have other assignments`);
+          results[currentDate] = { 
+            success: false, 
+            error: "Cannot assign technician to EAU as they already have other assignments" 
+          };
+          continue;
+        }
+        
+        // If the technician is already assigned to EAU, they can't be assigned elsewhere
+        const technicianAssignedToEAU = updatedAssignments.some(
+          (a: any) => a.technicianId === newTechnicianId && a.location === "Emergency Assessment Unit"
+        );
+        
+        if (technicianAssignedToEAU && location && location !== "Emergency Assessment Unit") {
+          console.log(`Cannot assign technician ${newTechnicianId} to ${location} as they are already assigned to EAU`);
+          results[currentDate] = { 
+            success: false, 
+            error: "Cannot assign technician to other wards as they are already assigned to EAU" 
+          };
+          continue;
+        }
+      }
+      
+      // Update all matching assignments
+      updatedAssignments = updatedAssignments.map((assign: any) => {
+        const currentAssignment = assign as TechnicianAssignment;
+        
+        // For day scope, match on location if provided
+        // For week scope, match on all assignments for the technician
+        const locationMatches = !location || currentAssignment.location === location;
+        
+        if (locationMatches && currentAssignment.technicianId === originalTechnicianId) {
+          assignmentsUpdated++;
+          return { ...currentAssignment, technicianId: newTechnicianId };
+        }
+        return currentAssignment;
+      });
+      
+      // Update the rota with the new assignments
+      if (assignmentsUpdated > 0) {
+        await ctx.db.patch(rotaId, { assignments: updatedAssignments });
+        console.log(`Updated ${assignmentsUpdated} assignments in rota ${rotaId} for date ${currentDate}`);
+        results[currentDate] = { success: true, assignmentsUpdated };
+      } else {
+        console.log(`No assignments updated in rota ${rotaId} for date ${currentDate}`);
+        results[currentDate] = { success: true, assignmentsUpdated: 0 };
+      }
+    }
+    
+    return { success: true, results };
   }
 });
 
@@ -2027,28 +2298,229 @@ export const getRotaConfiguration = query({
 export const updateRotaAssignment = mutation({
   args: {
     rotaId: v.id("technicianRotas"),
-    assignmentIndex: v.number(),
-    technicianId: v.id("technicians"),
+    location: v.string(),
+    startTime: v.string(),
+    originalTechnicianId: v.id("technicians"),
+    newTechnicianId: v.id("technicians"),
+    assignmentId: v.optional(v.id("technicianRotas")),
+    scope: v.optional(v.union(v.literal("slot"), v.literal("day"), v.literal("week"))),
+    endTime: v.optional(v.string())
   },
   handler: async (ctx, args) => {
-    const rota = await ctx.db.get(args.rotaId);
-    
+    const { rotaId, location, startTime, originalTechnicianId, newTechnicianId, endTime } = args;
+
+    const rota = await ctx.db.get(rotaId);
     if (!rota) {
-      throw new Error("Rota not found");
+      throw new Error(`Rota with ID ${rotaId} not found`);
+    }
+
+    // Log the rota and its assignments for debugging
+    console.log(`Rota found with ID ${rotaId}. Date: ${rota.date}, Status: ${rota.status}`);
+    console.log(`Looking for assignment with location: ${location}, startTime: ${startTime}, technicianId: ${originalTechnicianId}`);
+    console.log(`Rota has ${rota.assignments?.length || 0} assignments`);
+    
+    // If there are assignments, log the first few to see their structure
+    if (rota.assignments && rota.assignments.length > 0) {
+      console.log('Sample assignments:', rota.assignments.slice(0, 3));
+    }
+
+    // More flexible matching - try to find the best match
+    let bestMatch = null;
+    let exactMatch = false;
+    
+    // First pass - look for exact match
+    for (const assign of (rota.assignments || [])) {
+      const currentAssignment = assign as TechnicianAssignment;
+      
+      // Check for exact match
+      if (currentAssignment.location === location &&
+          currentAssignment.startTime === startTime &&
+          currentAssignment.technicianId === originalTechnicianId) {
+        bestMatch = currentAssignment;
+        exactMatch = true;
+        break;
+      }
     }
     
-    // Update the assignment
-    const assignments = [...(rota.assignments || [])];
-    if (assignments[args.assignmentIndex]) {
-      assignments[args.assignmentIndex] = {
-        ...assignments[args.assignmentIndex],
-        technicianId: args.technicianId
-      };
+    // Second pass - if no exact match, try more flexible matching
+    if (!exactMatch) {
+      for (const assign of (rota.assignments || [])) {
+        const currentAssignment = assign as TechnicianAssignment;
+        
+        // Check for location match (case insensitive)
+        const locationMatches = currentAssignment.location.toLowerCase() === location.toLowerCase();
+        
+        // Check for time overlap
+        const timeOverlaps = (
+          (currentAssignment.startTime <= startTime && currentAssignment.endTime > startTime) ||
+          (currentAssignment.startTime < startTime && currentAssignment.endTime >= startTime) ||
+          (currentAssignment.startTime === startTime)
+        );
+        
+        // Check for technician match
+        const technicianMatches = currentAssignment.technicianId === originalTechnicianId;
+        
+        if (locationMatches && timeOverlaps && technicianMatches) {
+          bestMatch = currentAssignment;
+          break;
+        }
+      }
     }
+
+    if (!bestMatch) {
+      console.warn(`No assignment found to update in rota ${rotaId} for technician ${originalTechnicianId} at ${location} ${startTime}`);
+      return { success: false, message: "Assignment not found" };
+    }
+
+    // Determine if we need to split a full-day assignment into half-day assignments
+    const requestedEndTime = endTime || "13:00"; // Default to morning slot if not specified
+    const isFullDayAssignment = bestMatch.startTime === "09:00" && bestMatch.endTime === "17:00";
+    const isHalfDayRequest = (startTime === "09:00" && requestedEndTime === "13:00") || 
+                            (startTime === "13:00" && requestedEndTime === "17:00");
     
-    await ctx.db.patch(args.rotaId, { assignments });
-    return args.rotaId;
-  }
+    // Check if there's a matching assignment for the other half of the day
+    const otherHalfStartTime = startTime === "09:00" ? "13:00" : "09:00";
+    const otherHalfEndTime = startTime === "09:00" ? "17:00" : "13:00";
+    
+    // Look for an assignment for the other half of the day with the same technician
+    const otherHalfAssignment = rota.assignments.find((a: any) => 
+      a.location === location && 
+      a.startTime === otherHalfStartTime && 
+      a.endTime === otherHalfEndTime && 
+      a.technicianId === originalTechnicianId
+    );
+    
+    console.log(`Checking for other half assignment: ${otherHalfStartTime}-${otherHalfEndTime}`, 
+                otherHalfAssignment ? "Found" : "Not found");
+
+    let updatedAssignments = [...rota.assignments];
+    
+    // Case 1: If this is a full-day assignment but the request is for a half-day, split it
+    if (isFullDayAssignment && isHalfDayRequest) {
+      console.log(`Splitting full-day assignment into half-day assignments`);
+      
+      // Find the index of the assignment to remove
+      const indexToRemove = updatedAssignments.findIndex(
+        (a: any) => a.location === bestMatch?.location && 
+                   a.startTime === bestMatch?.startTime && 
+                   a.technicianId === bestMatch?.technicianId
+      );
+      
+      if (indexToRemove !== -1) {
+        // Remove the full-day assignment
+        updatedAssignments.splice(indexToRemove, 1);
+        
+        // Create morning assignment (9:00-13:00)
+        const morningAssignment = {
+          ...bestMatch,
+          startTime: "09:00",
+          endTime: "13:00",
+          technicianId: startTime === "09:00" ? newTechnicianId : bestMatch.technicianId
+        };
+        
+        // Create afternoon assignment (13:00-17:00)
+        const afternoonAssignment = {
+          ...bestMatch,
+          startTime: "13:00",
+          endTime: "17:00",
+          technicianId: startTime === "13:00" ? newTechnicianId : bestMatch.technicianId
+        };
+        
+        // Add both half-day assignments
+        updatedAssignments.push(morningAssignment, afternoonAssignment);
+        console.log(`Created half-day assignments: Morning: ${JSON.stringify(morningAssignment)}, Afternoon: ${JSON.stringify(afternoonAssignment)}`);
+      }
+    } 
+    // Case 2: If this is already a half-day assignment and there's another half-day assignment for the same technician
+    else if (isHalfDayRequest) {
+      console.log(`Handling half-day assignment update`);
+      
+      // Update only the requested half-day assignment
+      let found = false;
+      updatedAssignments = updatedAssignments.map((assign: any) => {
+        const currentAssignment = assign as TechnicianAssignment;
+        
+        // Only update the specific half-day assignment that was clicked
+        if (currentAssignment.location === location &&
+            currentAssignment.startTime === startTime &&
+            currentAssignment.technicianId === originalTechnicianId) {
+          console.log(`Updating half-day assignment: ${JSON.stringify(currentAssignment)}`);
+          found = true;
+          return { ...currentAssignment, technicianId: newTechnicianId };
+        }
+        return currentAssignment;
+      });
+      
+      // If we didn't find the assignment to update, it might be a full-day assignment that needs to be split
+      if (!found) {
+        console.log(`Assignment not found with exact match, checking for full-day assignments`);
+        
+        // Look for a full-day assignment that covers this time slot
+        const fullDayAssignment = updatedAssignments.find(
+          (a: any) => a.location === location && 
+                     a.startTime === "09:00" && 
+                     a.endTime === "17:00" && 
+                     a.technicianId === originalTechnicianId
+        );
+        
+        if (fullDayAssignment) {
+          console.log(`Found full-day assignment that needs to be split: ${JSON.stringify(fullDayAssignment)}`);
+          
+          // Find the index of the assignment to remove
+          const indexToRemove = updatedAssignments.findIndex(
+            (a: any) => a.location === fullDayAssignment.location && 
+                       a.startTime === fullDayAssignment.startTime && 
+                       a.endTime === fullDayAssignment.endTime && 
+                       a.technicianId === fullDayAssignment.technicianId
+          );
+          
+          if (indexToRemove !== -1) {
+            // Remove the full-day assignment
+            updatedAssignments.splice(indexToRemove, 1);
+            
+            // Create morning assignment (9:00-13:00)
+            const morningAssignment = {
+              ...fullDayAssignment,
+              startTime: "09:00",
+              endTime: "13:00",
+              technicianId: startTime === "09:00" ? newTechnicianId : fullDayAssignment.technicianId
+            };
+            
+            // Create afternoon assignment (13:00-17:00)
+            const afternoonAssignment = {
+              ...fullDayAssignment,
+              startTime: "13:00",
+              endTime: "17:00",
+              technicianId: startTime === "13:00" ? newTechnicianId : fullDayAssignment.technicianId
+            };
+            
+            // Add both half-day assignments
+            updatedAssignments.push(morningAssignment, afternoonAssignment);
+            console.log(`Split into half-day assignments: Morning: ${JSON.stringify(morningAssignment)}, Afternoon: ${JSON.stringify(afternoonAssignment)}`);
+          }
+        }
+      }
+    }
+    // Case 3: Just update the existing assignment without splitting
+    else {
+      updatedAssignments = updatedAssignments.map((assign: any) => {
+        const currentAssignment = assign as TechnicianAssignment;
+        
+        if (currentAssignment.location === bestMatch.location &&
+            currentAssignment.startTime === bestMatch.startTime &&
+            currentAssignment.technicianId === bestMatch.technicianId) {
+          console.log(`Updating existing assignment: ${JSON.stringify(currentAssignment)}`);
+          return { ...currentAssignment, technicianId: newTechnicianId };
+        }
+        return currentAssignment;
+      });
+    }
+
+    await ctx.db.patch(rotaId, { assignments: updatedAssignments });
+    
+    console.log(`Updated assignment in rota ${rotaId} for original technician ${originalTechnicianId} at ${location} ${startTime} to new technician ${newTechnicianId}`);
+    return { success: true };
+  },
 });
 
 // Publish a technician rota

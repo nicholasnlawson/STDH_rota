@@ -3,6 +3,8 @@ import { format, parseISO, addDays, isSameDay } from 'date-fns';
 import { getTechnicianColor, getContrastColor } from './utils/technicianColors';
 
 interface Assignment {
+  _id: string; // Unique ID for the assignment itself
+  rotaId: string; // ID of the parent rota document
   category: string;
   date: string;
   endTime: string;
@@ -16,6 +18,37 @@ interface Assignment {
 interface TechnicianRotaTableViewProps {
   assignments: Assignment[];
   startDate: string; // ISO date string for Monday of the week
+  isViewOnly?: boolean; // Added to control interactivity
+  onTechnicianAssignmentClick?: (details: {
+    assignment: Assignment;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => void; // Added for click-to-replace
+  onDragStart?: (details: {
+    assignment: Assignment;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => void;
+  onDragOver?: (e: React.DragEvent<HTMLDivElement>) => void;
+  onDragEnter?: (details: {
+    assignment: Assignment | null;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => void;
+  onDragLeave?: () => void;
+  onDrop?: (details: {
+    assignment: Assignment | null;
+    location: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+  }) => void;
 }
 
 const DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
@@ -24,7 +57,17 @@ const TIME_SLOTS = [
   { start: '13:00', end: '17:00' }
 ];
 
-export function TechnicianRotaTableView({ assignments, startDate }: TechnicianRotaTableViewProps) {
+export function TechnicianRotaTableView({ 
+  assignments, 
+  startDate, 
+  isViewOnly = false, 
+  onTechnicianAssignmentClick,
+  onDragStart,
+  onDragOver,
+  onDragEnter,
+  onDragLeave,
+  onDrop
+}: TechnicianRotaTableViewProps) {
   // Group assignments by location and date
   const assignmentsByLocation = React.useMemo(() => {
     const locations = new Map<string, Record<string, Assignment[]>>();
@@ -168,67 +211,197 @@ export function TechnicianRotaTableView({ assignments, startDate }: TechnicianRo
                     const slotAssignments = getAssignmentsForSlot(location, date, slot);
                     return (
                       <td
-  key={`${location}-${date.toISOString()}-${slotIdx}`}
-  className="border"
-  style={{
-    height: '3rem',
-    minWidth: '6rem',
-    padding: 0,
-    margin: 0,
-    verticalAlign: 'middle',
-    position: 'relative',
-    backgroundColor: '#ffffff',
-    overflow: 'visible',
-    boxSizing: 'border-box',
-  }}
->
-  {slotAssignments.length > 0 ? (
-    <div 
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        width: '100%',
-        height: '100%',
-        margin: 0,
-        padding: 0,
-        overflow: 'visible',
-        boxSizing: 'border-box',
-      }}
-    >
-      {slotAssignments.map((assignment, assignmentIndex) => {
-        const bgColor = assignment.technicianId ? getTechnicianColor(assignment.technicianId) : '#f3f4f6';
-        const textColor = assignment.technicianId ? getContrastColor(bgColor) : '#4b5563';
-        const uniqueKey = `${assignment.technicianId || 'unassigned'}-${assignment.startTime}-${assignment.endTime}-${assignmentIndex}`;
-        
-        return (
-          <div 
-            key={uniqueKey}
-            style={{
-              flex: `1 0 ${100 / slotAssignments.length}%`,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              backgroundColor: bgColor,
-              color: textColor,
-              width: '100%',
-              padding: '4px',
-              margin: 0,
-              fontSize: '13px',
-              fontWeight: 500,
-              textAlign: 'center',
-              lineHeight: '1.4',
-              borderBottom: assignmentIndex < slotAssignments.length - 1 ? '1px solid rgba(255, 255, 255, 0.3)' : 'none',
-              overflow: 'visible',
-            }}
-            title={`${assignment.technicianName || 'Unassigned'} (${assignment.startTime}-${assignment.endTime})`}
-          >
-            {assignment.technicianName || 'Unassigned'}
-          </div>
-        );
-      })}
-    </div>
-  ) : null}
-</td>
+                        key={`${location}-${date.toISOString()}-${slotIdx}`}
+                        className="border"
+                        style={{
+                          height: '3rem',
+                          minWidth: '6rem',
+                          padding: 0,
+                          margin: 0,
+                          verticalAlign: 'middle',
+                          position: 'relative',
+                          backgroundColor: '#ffffff',
+                          overflow: 'visible',
+                          boxSizing: 'border-box',
+                        }}
+                      >
+                        {slotAssignments.length > 0 ? (
+                          <div 
+                            style={{
+                              display: 'flex',
+                              flexDirection: 'column',
+                              width: '100%',
+                              height: '100%',
+                              margin: 0,
+                              padding: 0,
+                              overflow: 'visible',
+                              boxSizing: 'border-box',
+                            }}
+                          >
+                            {slotAssignments.map((assignment, assignmentIndex) => {
+                              const bgColor = assignment.technicianId ? getTechnicianColor(assignment.technicianId) : '#f3f4f6';
+                              const textColor = assignment.technicianId ? getContrastColor(bgColor) : '#4b5563';
+                              const uniqueKey = `${assignment.technicianId || 'unassigned'}-${assignment.startTime}-${assignment.endTime}-${assignmentIndex}`;
+                              
+                              return (
+                                <div 
+                                  key={uniqueKey}
+                                  style={{
+                                    backgroundColor: bgColor,
+                                    color: textColor,
+                                    padding: '0.2rem 0.3rem', 
+                                    margin: assignmentIndex > 0 ? '1px 0 0 0' : '0', 
+                                    borderRadius: '0.2rem',
+                                    fontSize: '0.7rem', 
+                                    fontWeight: 500,
+                                    textAlign: 'center',
+                                    width: '100%',
+                                    minHeight: '1.5em', 
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    boxSizing: 'border-box',
+                                    lineHeight: '1.1',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    whiteSpace: 'nowrap', 
+                                    flexGrow: 1,
+                                    flexShrink: 0,
+                                    flexBasis: `${100 / slotAssignments.length}%`,
+                                  }}
+                                  className={`${!isViewOnly ? 'cursor-pointer hover:opacity-80' : ''}`}
+                                  draggable={!isViewOnly && !!assignment.technicianId}
+                                  onDragStart={(e) => {
+                                    if (!isViewOnly && onDragStart && assignment.technicianId) {
+                                      onDragStart({
+                                        assignment,
+                                        location,
+                                        date: format(date, 'yyyy-MM-dd'),
+                                        startTime: slot.start,
+                                        endTime: slot.end,
+                                      });
+                                    }
+                                  }}
+                                  onDragOver={(e) => {
+                                    if (!isViewOnly && onDragOver) {
+                                      e.preventDefault(); // Necessary to allow dropping
+                                      onDragOver(e);
+                                    }
+                                  }}
+                                  onDragEnter={(e) => {
+                                    if (!isViewOnly && onDragEnter) {
+                                      e.preventDefault();
+                                      onDragEnter({
+                                        assignment,
+                                        location,
+                                        date: format(date, 'yyyy-MM-dd'),
+                                        startTime: slot.start,
+                                        endTime: slot.end,
+                                      });
+                                    }
+                                  }}
+                                  onDragLeave={(e) => {
+                                    if (!isViewOnly && onDragLeave) {
+                                      onDragLeave();
+                                    }
+                                  }}
+                                  onDrop={(e) => {
+                                    if (!isViewOnly && onDrop) {
+                                      e.preventDefault();
+                                      onDrop({
+                                        assignment,
+                                        location,
+                                        date: format(date, 'yyyy-MM-dd'),
+                                        startTime: slot.start,
+                                        endTime: slot.end,
+                                      });
+                                    }
+                                  }}
+                                  onClick={() => {
+                                    if (!isViewOnly && onTechnicianAssignmentClick) {
+                                      onTechnicianAssignmentClick({
+                                        assignment,
+                                        location,
+                                        date: format(date, 'yyyy-MM-dd'),
+                                        startTime: slot.start,
+                                        endTime: slot.end,
+                                      });
+                                    }
+                                  }}
+                                >
+                                  {assignment.technicianName || assignment.technicianId || 'Unassigned'}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div 
+                            className={`w-full h-full flex items-center justify-center text-gray-400 ${!isViewOnly ? 'cursor-pointer hover:bg-gray-50' : ''}`}
+                            onDragOver={(e) => {
+                              if (!isViewOnly && onDragOver) {
+                                e.preventDefault(); // Necessary to allow dropping
+                                onDragOver(e);
+                              }
+                            }}
+                            onDragEnter={(e) => {
+                              if (!isViewOnly && onDragEnter) {
+                                e.preventDefault();
+                                onDragEnter({
+                                  assignment: null,
+                                  location,
+                                  date: format(date, 'yyyy-MM-dd'),
+                                  startTime: slot.start,
+                                  endTime: slot.end,
+                                });
+                              }
+                            }}
+                            onDragLeave={(e) => {
+                              if (!isViewOnly && onDragLeave) {
+                                onDragLeave();
+                              }
+                            }}
+                            onDrop={(e) => {
+                              if (!isViewOnly && onDrop) {
+                                e.preventDefault();
+                                onDrop({
+                                  assignment: null,
+                                  location,
+                                  date: format(date, 'yyyy-MM-dd'),
+                                  startTime: slot.start,
+                                  endTime: slot.end,
+                                });
+                              }
+                            }}
+                            onClick={() => {
+                              if (!isViewOnly && onTechnicianAssignmentClick) { 
+                                // For empty cells, we can pass a null assignment or create a placeholder
+                                const emptyAssignment: Assignment = {
+                                  _id: '',
+                                  rotaId: '',
+                                  technicianId: '',
+                                  category: '',
+                                  date: format(date, 'yyyy-MM-dd'),
+                                  location,
+                                  startTime: slot.start,
+                                  endTime: slot.end,
+                                  type: 'empty'
+                                };
+                                
+                                onTechnicianAssignmentClick({
+                                  assignment: emptyAssignment,
+                                  location,
+                                  date: format(date, 'yyyy-MM-dd'),
+                                  startTime: slot.start,
+                                  endTime: slot.end,
+                                });
+                              }
+                            }}
+                          >
+                            {/* Optionally, show a '+' icon or similar for adding new assignments */}
+                            {!isViewOnly && "+"}
+                          </div>
+                        )}
+                      </td>
                     );
                   })}
                 </React.Fragment>
