@@ -4,20 +4,6 @@ import { api } from "../convex/_generated/api";
 import { Id } from "../convex/_generated/dataModel";
 import { getBankHolidaysInRange, BankHoliday } from "./bankHolidays";
 
-type RotaAssignment = {
-  pharmacistId: Id<"pharmacists">;
-  type: "ward" | "dispensary" | "clinic" | "management" | "unavailable";
-  location: string;
-  startTime: string;
-  endTime: string;
-  isLunchCover?: boolean;
-  reason?: string;
-  // For local state management
-  date?: string;
-  rotaId?: Id<"rotas">;
-  _id?: string;
-};
-
 // Add type declarations for custom properties on the window object
 declare global {
   interface Window {
@@ -180,6 +166,16 @@ export function RotaView({
   // Query to get all rotas - with appropriate filter based on view mode
   const allRotas = useQuery(api.rotas.listRotas, { status: effectiveViewOnly ? "published" : "draft" }) || [];
   
+  // State for tracking which cell has text input active
+  const [activeCellInput, setActiveCellInput] = useState<string | null>(null);
+  
+  // State for tracking which cell has the protected rota time context menu open
+  const [protectedTimeMenuCell, setProtectedTimeMenuCell] = useState<{
+    date: string;
+    slot: { start: string; end: string };
+    position: { x: number; y: number };
+  } | null>(null);
+  
   // State for tracking dynamically added EAU rows
   const [eauAdditionalRows, setEauAdditionalRows] = useState<number[]>([]);
   
@@ -322,9 +318,7 @@ export function RotaView({
         
         // If in edit mode of published rota, notify parent about changes
         if (!effectiveViewOnly && onEditsChanged) {
-          onEditsChanged({
-            assignments: rotaAssignments
-          });
+          onEditsChanged({ freeCellText: updatedFreeCellText });
         }
       }
     });
@@ -345,7 +339,6 @@ export function RotaView({
   
   // Track which permanent unavailable rules to ignore (when user deselects them)
   const [ignoredUnavailableRules, setIgnoredUnavailableRules] = useState<Record<string, number[]>>({});
-  const [isPaused, setIsPaused] = useState(false);
   const [singlePharmacistDispensaryDays, setSinglePharmacistDispensaryDays] = useState<string[]>([]);
   // Weekdays are now defined at the top of the component
   const [bankHolidays, setBankHolidays] = useState<BankHoliday[]>([]);
@@ -360,7 +353,6 @@ export function RotaView({
     startTime?: string,
     endTime?: string,
     otherPharmacistIds?: Id<"pharmacists">[],  // Track other pharmacists in the same cell
-    existingPharmacistIds?: Id<"pharmacists">[], // Track pharmacists already in the unavailable row
     newAssignment?: {
       location: string,
       type: "ward" | "dispensary" | "clinic" | "management",
@@ -512,13 +504,9 @@ export function RotaView({
     const dayLabel = DAYS[date.getDay()];
     
     return pharmacists.filter((p: any) => {
-      // Check for permanent protected rota time, respecting ignored rules
+      // Check for permanent protected rota time
       const hasPermanentProtectedTime = p.notAvailableRules && Array.isArray(p.notAvailableRules) && 
-        p.notAvailableRules.some((rule: any, index: number) => {
-          // Skip this rule if it's in the ignored list
-          const ignoredIndices = ignoredUnavailableRules[p._id] || [];
-          if (ignoredIndices.includes(index)) return false;
-          
+        p.notAvailableRules.some((rule: any) => {
           if (rule.dayOfWeek !== dayLabel) return false;
           
           // Check if the permanent rule times overlap with this slot
@@ -587,6 +575,20 @@ export function RotaView({
     });
   }
   
+  // Helper to open the protected rota time context menu
+  function openProtectedTimeMenu(event: React.MouseEvent, date: string, slot: { start: string, end: string }) {
+    event.preventDefault();
+    event.stopPropagation();
+    
+    // Position the menu near the click, but ensure it stays within viewport
+    const position = {
+      x: Math.min(event.clientX, window.innerWidth - 260),
+      y: Math.min(event.clientY, window.innerHeight - 300)
+    };
+    
+    setProtectedTimeMenuCell({ date, slot, position });
+  }
+  
   // Toggle a permanent unavailable rule as ignored/not ignored
   function toggleUnavailableRule(pharmacistId: string, ruleIndex: number, ignored: boolean) {
     setIgnoredUnavailableRules(prev => {
@@ -645,60 +647,6 @@ export function RotaView({
     );
 
     return !!dispensaryAssignment;
-  }
-  
-  // Function to check if a pharmacist is marked as unavailable during a specific time slot
-  function isPharmacistUnavailable(
-    pharmacistId: Id<"pharmacists">,
-    date: string,
-    timeSlot: { start: string; end: string }
-  ) {
-    // Check explicit unavailable assignments
-    const hasExplicitUnavailable = rotaAssignments.some(a =>
-      (a.type === "unavailable" || (a.type === "management" && a.location === "Unavailable Pharmacists")) &&
-      a.date === date &&
-      a.pharmacistId === pharmacistId &&
-      ((a.startTime <= timeSlot.start && a.endTime > timeSlot.start) || 
-       (a.startTime < timeSlot.end && a.endTime >= timeSlot.end) ||
-       (a.startTime >= timeSlot.start && a.endTime <= timeSlot.end))
-    );
-    
-    if (hasExplicitUnavailable) return true;
-    
-    // Check protected rota time
-    const dayDate = new Date(date);
-    const dayLabel = DAYS[dayDate.getDay()];
-    const pharmacist = pharmacists.find(p => p._id === pharmacistId);
-    
-    if (!pharmacist) return false;
-    
-    // Check permanent protected time rules, respecting ignored/paused rules
-    const hasPermanentProtectedTime = pharmacist.notAvailableRules && Array.isArray(pharmacist.notAvailableRules) && 
-      pharmacist.notAvailableRules.some((rule: any, index: number) => {
-        // Skip this rule if it's in the ignored list
-        const ignoredIndices = ignoredUnavailableRules[pharmacistId] || [];
-        if (ignoredIndices.includes(index)) return false;
-        
-        if (rule.dayOfWeek !== dayLabel) return false;
-        
-        return (rule.startTime <= timeSlot.start && rule.endTime > timeSlot.start) || 
-               (rule.startTime < timeSlot.end && rule.endTime >= timeSlot.end) ||
-               (rule.startTime >= timeSlot.start && rule.endTime <= timeSlot.end);
-      });
-    
-    if (hasPermanentProtectedTime) return true;
-    
-    // Check ad-hoc protected time rules
-    const hasAdHocProtectedTime = rotaUnavailableRules[pharmacistId] && 
-      rotaUnavailableRules[pharmacistId].some((rule: any) => {
-        if (rule.dayOfWeek !== dayLabel) return false;
-        
-        return (rule.startTime <= timeSlot.start && rule.endTime > timeSlot.start) || 
-               (rule.startTime < timeSlot.end && rule.endTime >= timeSlot.end) ||
-               (rule.startTime >= timeSlot.start && rule.endTime <= timeSlot.end);
-      });
-    
-    return hasAdHocProtectedTime;
   }
 
   // Helper: get pharmacist cell color
@@ -993,17 +941,6 @@ export function RotaView({
               }
             });
           }
-        }
-        
-        // Update the date's assignments
-        const updatedDateAssignments = [...otherAssignments, ...dispensaryAssignments];
-        
-        // Update the main assignments array
-        const assignmentIndices = currentAssignments
-          .map((a, i) => (a.date === date ? i : -1))
-          .filter(i => i !== -1);
-        
-        assignmentIndices.forEach((idx, i) => {
           if (i < updatedDateAssignments.length) {
             currentAssignments[idx] = updatedDateAssignments[i];
           }
@@ -2375,21 +2312,6 @@ const getAssignmentForCell = (
     console.log(`[handleCellClick] Other pharmacists in this cell: ${otherPharmacistIds.length > 0 ? otherPharmacistIds.join(', ') : 'none'}`);
     console.log(`[handleCellClick] Selected time slot: ${cellStartTime}-${cellEndTime}`);
 
-    // For the Unavailable Pharmacists row, gather all existing unavailable pharmacists
-    let existingPharmacistIds: Id<"pharmacists">[] = [];
-    if (assignment.location === "Unavailable Pharmacists") {
-      existingPharmacistIds = rotaAssignments
-        .filter(a => 
-          a.date === assignmentDate &&
-          a.startTime === (cellStartTime || assignment.startTime) &&
-          a.endTime === (cellEndTime || assignment.endTime) &&
-          a.location === "Unavailable Pharmacists"
-        )
-        .map(a => a.pharmacistId);
-      
-      console.log(`[handleCellClick] Found ${existingPharmacistIds.length} existing unavailable pharmacists`);
-    }
-    
     // Store both the selected pharmacist and other pharmacists in the cell
     setSelectedCell({ 
       rotaId,
@@ -2400,7 +2322,6 @@ const getAssignmentForCell = (
       startTime: cellStartTime || assignment.startTime,
       endTime: cellEndTime || assignment.endTime,
       otherPharmacistIds, // Keep track of other pharmacists in the same cell
-      existingPharmacistIds, // Add existing unavailable pharmacists for selection modal
       // Add appropriate newAssignment based on the type
       newAssignment: isLunchCover ? {
         location: "Dispensary", // Keep this as Dispensary to match backend expectations
@@ -2411,118 +2332,6 @@ const getAssignmentForCell = (
       } : undefined
     });
     setShowPharmacistSelection(true);
-  };
-
-  // Handle selecting multiple pharmacists for unavailable slots
-  const handlePharmacistSelectMultiple = async (pharmacistIds: Id<"pharmacists">[], scope: "slot" | "day" | "week", removedPharmacistIds?: Id<"pharmacists">[]) => {
-    if (!selectedCell) {
-      console.error("[handlePharmacistSelectMultiple] No cell selected");
-      return;
-    }
-
-    const { rotaId, date, startTime, endTime } = selectedCell;
-
-    // Check if we have valid startTime and endTime
-    if (!startTime || !endTime) {
-      console.error("Missing startTime or endTime for unavailable assignments");
-      return;
-    }
-
-    try {
-      // Step 1: Find all existing assignments for this time slot
-      const existingAssignments = rotaAssignments.filter(a => 
-        a.date === date &&
-        a.startTime === startTime &&
-        a.endTime === endTime &&
-        a.location === "Unavailable Pharmacists"
-      );
-
-      // Step 2: Remove all existing assignments from UI state
-      setRotaAssignments(prev => 
-        prev.filter(a => 
-          !(a.date === date && 
-            a.startTime === startTime && 
-            a.endTime === endTime && 
-            a.location === "Unavailable Pharmacists")
-        )
-      );
-
-      // Step 3: Remove all existing assignments from database
-      for (const assignment of existingAssignments) {
-        // Find the index of this assignment in the rota
-        const rota = await convex.query(api.rotas.getRota, { rotaId });
-        if (!rota) continue;
-        
-        const assignmentIndex = rota.assignments.findIndex(a => 
-          a.pharmacistId === assignment.pharmacistId &&
-          a.startTime === startTime &&
-          a.endTime === endTime &&
-          a.location === "Unavailable Pharmacists"
-        );
-        
-        if (assignmentIndex !== -1) {
-          await updateAssignment({
-            rotaId,
-            pharmacistId: assignment.pharmacistId,
-            assignmentIndex, // Delete the specific assignment
-            newAssignment: undefined
-          });
-        }
-      }
-
-      console.log(`Cleared ${existingAssignments.length} existing unavailable assignments`);
-
-      // Step 4: If we have pharmacists to add, create new assignments
-      if (pharmacistIds.length > 0) {
-        // Create new assignments array for UI update
-        const newAssignments: RotaAssignment[] = [];
-      
-        for (const pharmacistId of pharmacistIds) {
-          // Add to local state
-          newAssignments.push({
-            pharmacistId,
-            type: "management",
-            location: "Unavailable Pharmacists",
-            startTime: startTime!,
-            endTime: endTime!,
-            date
-          });
-
-          // Add to database
-          await updateAssignment({
-            rotaId,
-            pharmacistId,
-            assignmentIndex: -1, // Create new assignment
-            newAssignment: {
-              type: "management" as const,
-              startTime: startTime!,
-              endTime: endTime!,
-              location: "Unavailable Pharmacists"
-            }
-          });
-        }
-
-        // Update UI state with new assignments
-        setRotaAssignments(prev => [...prev, ...newAssignments]);
-        console.log(`Added ${pharmacistIds.length} new unavailable assignments`);
-      } else {
-        console.log("No pharmacists selected, all unavailable assignments cleared");
-      }
-
-      // Close the modal
-      setSelectedCell(null);
-      
-      // Mark this rota as modified
-      if (onEditsChanged) {
-        onEditsChanged({
-          assignments: rotaAssignments
-        });
-      }
-    } catch (error) {
-      console.error("Error updating unavailable assignments:", error);
-      // Re-throw the error to be handled by the caller if needed
-      throw error;
-    }
   };
 
   const handlePharmacistSelect = async (pharmacistId: Id<"pharmacists">, scope: "slot" | "day" | "week") => {
@@ -3394,14 +3203,7 @@ const getAssignmentForCell = (
       setRotaAssignments(refreshedAssignments);
       console.log(`[handlePharmacistSelect] Local state refreshed with ${refreshedAssignments.length} assignments from server.`);
     } else {
-      console.warn("[handlePharmacistSelect] No assignments found during server refresh.");
-    }
-    
-    // If in edit mode of published rota and we have a callback, notify parent about changes
-    if (!isViewOnly && onEditsChanged) {
-      onEditsChanged({
-        assignments: rotaAssignments
-      });
+      onEditsChanged({ assignments: [assignmentUpdate] });
     }
     
     console.log('[handlePharmacistSelect] Edit completed');
@@ -3541,7 +3343,7 @@ const getAssignmentForCell = (
           </div>
           <button
             className="bg-green-600 text-white py-2 px-4 rounded hover:bg-green-700 disabled:opacity-50"
-            disabled={selectedWeekdays.length === 0} // Only require weekdays to be selected
+            disabled={selectedClinicIds.length === 0 || selectedWeekdays.length === 0}
             onClick={() => {
               setShowClinicSelection(false);
               setShowPharmacistSelection(true);
@@ -3594,74 +3396,43 @@ const getAssignmentForCell = (
                     )}
                   </div>
                   {selectedPharmacistIds.includes(pharmacist._id) && (
-                    <>
-                      <div className="flex flex-wrap gap-2 items-center mb-2">
-                        <span className="text-sm font-medium">Available on:</span>
-                        {CLINIC_DAY_LABELS.map((day: string) => {
-                          const isSelected = pharmacistWorkingDays[pharmacist._id]?.includes(day) || false;
-                          return (
-                            <button
-                              key={day}
-                              type="button"
-                              className={`text-xs px-2 py-1 rounded-full transition-colors ${
-                                isSelected 
-                                  ? "bg-green-100 text-green-800 border border-green-300" 
-                                  : "bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200"
-                              }`}
-                              onClick={() => {
-                                // Create a temporary working days state for this pharmacist
-                                const newObj = { ...pharmacistWorkingDays };
-                                if (!newObj[pharmacist._id]) {
-                                  newObj[pharmacist._id] = [...pharmacistWorkingDays[pharmacist._id]];
-                                }
-                                
-                                if (isSelected) {
-                                  // Remove day if already selected
-                                  newObj[pharmacist._id] = newObj[pharmacist._id].filter(d => d !== day);
-                                } else {
-                                  // Add day if not selected
-                                  newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
-                                }
-                                
-                                setPharmacistWorkingDays(newObj);
-                              }}
-                              disabled={effectiveViewOnly}
-                            >
-                              {day}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      
-                      {/* Unavailability rules with pause buttons */}
-                      {pharmacist.notAvailableRules && pharmacist.notAvailableRules.length > 0 && (
-                        <div className="ml-4 mt-1 mb-2">
-                          <div className="flex items-center gap-1 mb-1">
-                            <span className="text-xs font-medium text-red-600">Unavailable periods:</span>
-                          </div>
-                          <div className="flex flex-col gap-1">
-                            {pharmacist.notAvailableRules.map((rule: any, index: number) => {
-                              const isIgnored = (ignoredUnavailableRules[pharmacist._id] || []).includes(index);
-                              return (
-                                <div key={index} className="flex items-center justify-between text-xs">
-                                  <span className={`${isIgnored ? 'text-gray-400 line-through' : 'text-red-600'}`}>
-                                    {rule.dayOfWeek} {rule.startTime}-{rule.endTime}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleUnavailableRule(pharmacist._id, index, !isIgnored)}
-                                    className={`ml-2 px-2 py-0.5 rounded text-xs ${isIgnored ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}
-                                    disabled={effectiveViewOnly}
-                                  >
-                                    {isIgnored ? 'Resume' : 'Pause'}
-                                  </button>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </div>
-                      )}
-                    </>
+                    <div className="flex flex-wrap gap-2 items-center mb-2">
+                      <span className="text-sm font-medium">Available on:</span>
+                      {CLINIC_DAY_LABELS.map((day: string) => {
+                        const isSelected = pharmacistWorkingDays[pharmacist._id]?.includes(day) || false;
+                        return (
+                          <button
+                            key={day}
+                            type="button"
+                            className={`text-xs px-2 py-1 rounded-full transition-colors ${
+                              isSelected 
+                                ? "bg-green-100 text-green-800 border border-green-300" 
+                                : "bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200"
+                            }`}
+                            onClick={() => {
+                              // Create a temporary working days state for this pharmacist
+                              const newObj = { ...pharmacistWorkingDays };
+                              if (!newObj[pharmacist._id]) {
+                                newObj[pharmacist._id] = [...pharmacistWorkingDays[pharmacist._id]];
+                              }
+                              
+                              if (isSelected) {
+                                // Remove day if already selected
+                                newObj[pharmacist._id] = newObj[pharmacist._id].filter(d => d !== day);
+                              } else {
+                                // Add day if not selected
+                                newObj[pharmacist._id] = [...newObj[pharmacist._id], day];
+                              }
+                              
+                              setPharmacistWorkingDays(newObj);
+                            }}
+                            disabled={effectiveViewOnly}
+                          >
+                            {day}
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
                 </div>
               ))}
@@ -3776,13 +3547,124 @@ const getAssignmentForCell = (
           >
             Confirm Pharmacists
           </button>
+        {/* Protected Rota Time Context Menu */}
+      {protectedTimeMenuCell && (
+        <div 
+          className="fixed inset-0 z-50"
+          onClick={() => setProtectedTimeMenuCell(null)}
+        >
+          <div 
+            className="absolute bg-white rounded shadow-lg p-4"
+            style={{
+              top: protectedTimeMenuCell.position.y,
+              left: protectedTimeMenuCell.position.x,
+              width: '300px',
+              maxHeight: '80vh',
+              overflow: 'auto',
+              zIndex: 1000,
+            }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex justify-between items-center border-b pb-2 mb-3">
+              <h3 className="font-semibold">Protected Rota Time</h3>
+              <button 
+                onClick={() => setProtectedTimeMenuCell(null)}
+                className="text-gray-500 hover:text-gray-700"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fillRule="evenodd" d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z" clipRule="evenodd" />
+                </svg>
+              </button>
+            </div>
+            
+            <div className="text-sm text-gray-600 mb-3">
+              {new Date(protectedTimeMenuCell.date).toLocaleDateString()} • {protectedTimeMenuCell.slot.start}-{protectedTimeMenuCell.slot.end}
+            </div>
+            
+            <div className="space-y-3">
+              {/* Add Protected Time button */}
+              <button
+                onClick={() => {
+                  const dayLabel = DAYS[new Date(protectedTimeMenuCell.date).getDay()];
+                  // Show a simple prompt to select a pharmacist
+                  const pharmacistName = prompt("Enter pharmacist name to add protected time:");
+                  if (pharmacistName) {
+                    // Find the pharmacist by name
+                    const pharmacist = pharmacists.find(p => 
+                      p.name.toLowerCase().includes(pharmacistName.toLowerCase())
+                    );
+                    if (pharmacist) {
+                      addRotaUnavailableRule(pharmacist._id, {
+                        dayOfWeek: dayLabel,
+                        startTime: protectedTimeMenuCell.slot.start,
+                        endTime: protectedTimeMenuCell.slot.end
+                      });
+                      setProtectedTimeMenuCell(null);
+                    } else {
+                      alert("Pharmacist not found");
+                    }
+                  }
+                }}
+                className="w-full bg-blue-50 hover:bg-blue-100 text-blue-700 py-2 px-3 rounded font-medium text-sm"
+              >
+                Add Protected Time
+              </button>
+              
+              {/* Pause Default Protected Time button */}
+              <button
+                onClick={() => {
+                  const dayLabel = DAYS[new Date(protectedTimeMenuCell.date).getDay()];
+                  // Show a simple prompt to select a pharmacist
+                  const pharmacistName = prompt("Enter pharmacist name to pause default protected time:");
+                  if (pharmacistName) {
+                    // Find the pharmacist by name
+                    const pharmacist = pharmacists.find(p => 
+                      p.name.toLowerCase().includes(pharmacistName.toLowerCase())
+                    );
+                    if (pharmacist && pharmacist.notAvailableRules) {
+                      // Find relevant rules
+                      const relevantRuleIndices = pharmacist.notAvailableRules
+                        .map((rule: any, index: number) => {
+                          if (rule.dayOfWeek !== dayLabel) return -1;
+                          
+                          const slot = protectedTimeMenuCell.slot;
+                          const overlaps = (rule.startTime <= slot.start && rule.endTime > slot.start) || 
+                                          (rule.startTime < slot.end && rule.endTime >= slot.end) ||
+                                          (rule.startTime >= slot.start && rule.endTime <= slot.end);
+                          
+                          return overlaps ? index : -1;
+                        })
+                        .filter((idx: number) => idx >= 0);
+                      
+                      if (relevantRuleIndices.length > 0) {
+                        relevantRuleIndices.forEach(idx => {
+                          toggleUnavailableRule(pharmacist._id, idx, true);
+                        });
+                        setProtectedTimeMenuCell(null);
+                      } else {
+                        alert("No default protected time found for this pharmacist at this time");
+                      }
+                    } else {
+                      alert("Pharmacist not found or has no protected time rules");
+                    }
+                  }
+                }}
+                className="w-full bg-yellow-50 hover:bg-yellow-100 text-yellow-700 py-2 px-3 rounded font-medium text-sm"
+              >
+                Pause Default Protected Time
+              </button>
+            </div>
+          </div>
         </div>
       )}
+      
+      {/* Render the rota table */}
       {(rotaGenerated || (rotaAssignments.length > 0 && selectedMonday)) && (
         <div className="mt-10" style={{ width: '100%', margin: 0, padding: 0 }}>
           <div className="flex justify-between items-center mb-4 mx-4">
             <h3 className="text-xl font-bold">Weekly Rota Table</h3>
             <div className="flex items-center space-x-2">
+{{ ... }}
               {publishSuccess && (
                 <span className="text-green-600 text-sm bg-green-100 px-2 py-1 rounded mr-2">
                   Rota published successfully!
@@ -4093,7 +3975,7 @@ const getAssignmentForCell = (
                         onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, ward.name, isoDate, slot.start, slot.end)}
                         onDragEnd={handleDragEnd}
                       >
-                        <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) || isPharmacistUnavailable(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
+                        <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
                           {getPharmacistName(assignment.pharmacistId)}
                         </span>
                       </div>
@@ -4167,7 +4049,7 @@ const getAssignmentForCell = (
                             onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, rowName, isoDate, slot.start, slot.end)}
                             onDragEnd={handleDragEnd}
                           >
-                            <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) || isPharmacistUnavailable(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
+                            <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
                               {getPharmacistName(assignment.pharmacistId)}
                             </span>
                           </div>
@@ -4260,7 +4142,7 @@ const getAssignmentForCell = (
                 onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, "Dispensary", isoDate, slot.start, slot.end)}
                 onDragEnd={handleDragEnd}
               >
-                <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) || isPharmacistUnavailable(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
+                <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
                   {displayName}{isLunch && " (lunch cover)"}
                 </span>
               </div>
@@ -4348,7 +4230,7 @@ const getAssignmentForCell = (
                       onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, clinic.name, isoDate, slot.start, slot.end)}
                       onDragEnd={handleDragEnd}
                     >
-                      <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) || isPharmacistUnavailable(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
+                      <span className={`text-center w-full ${hasOverlappingAssignments(assignment.pharmacistId, isoDate, slot) ? 'text-red-600 font-bold' : ''}`}>
                         {getPharmacistName(assignment.pharmacistId)}
                       </span>
                     </div>
@@ -4376,22 +4258,8 @@ const getAssignmentForCell = (
                     const isoDate = date.toISOString().split('T')[0];
                     return TIME_SLOTS.map((slot, slotIdx) => {
                       // Find unavailable pharmacists for this date/slot
-                      // First, find exact time slot assignments (for display)
-                      const exactSlotAssignments = rotaAssignments.filter(a => {
-                        // Include both management assignments with Unavailable location and traditional unavailable assignments
-                        const isUnavailableType = 
-                          (a.type === "management" && a.location === "Unavailable Pharmacists") || 
-                          a.type === "unavailable";
-                          
-                        return isUnavailableType && 
-                          a.date === isoDate && 
-                          a.startTime === slot.start && 
-                          a.endTime === slot.end;
-                      });
-                      
-                      // Then find overlapping unavailable times (includes protected time)
                       const unavailable = rotaAssignments.filter(a => 
-                        (a.type === "unavailable" || (a.type === "management" && a.location === "Unavailable Pharmacists")) && 
+                        a.type === "unavailable" && 
                         a.date === isoDate && 
                         ((a.startTime <= slot.start && a.endTime > slot.start) || 
                          (a.startTime < slot.end && a.endTime >= slot.end) ||
@@ -4402,18 +4270,9 @@ const getAssignmentForCell = (
                       });
                       
                       // Also get pharmacists with protected rota time for this date/slot
-                      // Only include pharmacists who aren't already in the unavailable list
-                      // Filter out items without _id first to make TypeScript happy
-                      const existingPharmacistIds = new Set(
-                        unavailable
-                          .filter(p => p && '_id' in p) // Make sure p has an _id property
-                          .map(p => (p as any)._id)
-                      );
+                      const protectedTimePharmacists = getProtectedRotaTimePharmacists(isoDate, slot);
                       
-                      const protectedTimePharmacists = getProtectedRotaTimePharmacists(isoDate, slot)
-                        .filter(p => !p._id || !existingPharmacistIds.has(p._id));
-                      
-                      // Combine both lists without duplicates
+                      // Combine both lists
                       const allUnavailablePharmacists = [
                         ...unavailable,
                         ...protectedTimePharmacists
@@ -4422,7 +4281,7 @@ const getAssignmentForCell = (
                       return (
                         <td 
                            key={dayOffset + '-' + slotIdx} 
-                           className={`p-1 text-xs bg-red-50 text-red-700 text-center${!effectiveViewOnly && !isDeselectedDay(date) ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselectedDay(date) ? 'bg-gray-200 not-selected-cell' : ''}`} 
+                           className={`p-1 text-xs bg-red-50 text-red-700 text-center relative${!effectiveViewOnly && !isDeselectedDay(date) ? ' cursor-pointer hover:bg-red-100' : ''} ${isDeselectedDay(date) ? ' bg-gray-200 not-selected-cell' : ''}`} 
                            style={{ 
                              borderTop: 'none',
                              borderBottom: 'none', 
@@ -4431,113 +4290,38 @@ const getAssignmentForCell = (
                              wordBreak: 'break-word',
                              ...(isDeselectedDay(date) ? { position: 'relative' as const, pointerEvents: 'none' as const } : {})
                            }}
-                           onDragOver={(e) => {
-                             if (effectiveViewOnly || isDeselectedDay(date)) return;
-                             e.preventDefault();
-                             e.currentTarget.classList.add('bg-red-200');
-                           }}
-                           onDragEnter={(e) => {
-                             if (effectiveViewOnly || isDeselectedDay(date)) return;
-                             e.preventDefault();
-                             e.currentTarget.classList.add('bg-red-200');
-                           }}
-                           onDragLeave={(e) => {
-                             if (effectiveViewOnly || isDeselectedDay(date)) return;
-                             e.currentTarget.classList.remove('bg-red-200');
-                           }}
-                           onDrop={(e) => {
-                             if (effectiveViewOnly || isDeselectedDay(date)) return;
-                             e.preventDefault();
-                             e.currentTarget.classList.remove('bg-red-200');
-                             
-                             // Get the dragged pharmacist ID
-                             const dragData = JSON.parse(e.dataTransfer.getData('text'));
-                             
-                             // Create a new unavailable assignment
-                             const rotaId = rotaIdsByDate[isoDate];
-                             if (!rotaId) return;
-                             
-                             // Set up a new assignment with these details
-                             const newAssignment = {
-                               type: "management" as const, // Use management type but with Unavailable location
-                               startTime: slot.start,
-                               endTime: slot.end,
-                               location: "Unavailable Pharmacists"
-                             };
-                             
-                             // Make sure we have a valid pharmacist ID
-                             if (!dragData.pharmacistId) return;
-                             
-                             // Parse the pharmacist ID to ensure it's valid
-                             const pharmacistId = dragData.pharmacistId as Id<"pharmacists">;
-                             
-                             // Set the selectedCell (similar to handleCellClick)
-                             setSelectedCell({
-                               rotaId,
-                               assignmentIndices: [],
-                               currentPharmacistId: pharmacistId,
-                               location: "Unavailable Pharmacists",
-                               date: isoDate,
-                               startTime: slot.start,
-                               endTime: slot.end,
-                               otherPharmacistIds: [],
-                               newAssignment
-                             });
-                             
-                             // Now use the pharmacist ID from the drag data
-                             handlePharmacistSelect(pharmacistId, "slot");
-                           }}
-                           onClick={(event) => {
+                          onClick={(event) => {
                             if (isDeselectedDay(date)) return;
                             if (effectiveViewOnly) return; // Do not allow editing in view-only mode
+                            // Reverted to createCellTextInput logic for free-text editing
+                            const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
+                            // Find all unavailable pharmacists for this cell to prepopulate text if cell is empty
+                            const unavailableHere = rotaAssignments.filter(a => 
+                              a.type === "unavailable" && 
+                              a.date === isoDate && 
+                              a.startTime === slot.start && 
+                              a.endTime === slot.end
+                            ).map(a => a.pharmacistDetails?.name || 'Unavailable');
                             
-                            // Get the rota ID for this date
-                            const rotaId = rotaIdsByDate[isoDate];
-                            if (!rotaId) return;
-                            
-                            // Set up a new assignment with these details
-                            const newAssignment = {
-                              type: "management" as const, // Use management type but with Unavailable location
-                              startTime: slot.start,
-                              endTime: slot.end,
-                              location: "Unavailable Pharmacists"
-                            };
-                            
-                            // Set the selectedCell (similar to handleCellClick)
-                            setSelectedCell({
-                              rotaId,
-                              assignmentIndices: [],
-                              currentPharmacistId: null, // Use null instead of undefined
-                              location: "Unavailable Pharmacists",
-                              date: isoDate,
-                              startTime: slot.start,
-                              endTime: slot.end,
-                              otherPharmacistIds: [],
-                              newAssignment
-                            });
-                            
-                            // Get the existing pharmacists in this unavailable cell
-                             const existingPharmacistIds = rotaAssignments
-                               .filter(a => 
-                                 a.date === isoDate &&
-                                 a.startTime === slot.start &&
-                                 a.endTime === slot.end &&
-                                 a.location === "Unavailable Pharmacists"
-                               )
-                               .map(a => a.pharmacistId);
-                             
-                             console.log(`[UnavailableRow Click] Found ${existingPharmacistIds.length} existing unavailable pharmacists:`, existingPharmacistIds);
-                               
-                             // Store the existing pharmacists in the selectedCell for use in the modal
-                             setSelectedCell(prev => prev ? {
-                               ...prev,
-                               existingPharmacistIds
-                             } : null);
-                             
-                             // Show the pharmacist selection modal with multiple selection for unavailable row
-                             setShowPharmacistSelection(true);
+                            const currentText = freeCellText[cellKey] || unavailableHere.join(', ');
+                            createCellTextInput(event.currentTarget as HTMLElement, cellKey, currentText, '#fee2e2'); // Light red background
                            }}
                         >
+                          {/* Protected Rota Time Management Button - only show when not in view-only mode and day is not deselected */}
+                          {!effectiveViewOnly && !isDeselectedDay(date) && (
+                            <button 
+                              className="absolute top-0 right-0 bg-red-100 hover:bg-red-200 text-red-700 rounded-bl p-0.5 opacity-70 hover:opacity-100"
+                              title="Manage Protected Rota Time"
+                              onClick={(e) => {
+                                e.stopPropagation(); // Prevent cell click handler
+                                openProtectedTimeMenu(e, isoDate, slot);
+                              }}
+                            >
+                              <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                              </svg>
+                            </button>
+                          )}
                           {(() => {
                             if (isDeselectedDay(date)) {
                               return (
@@ -4546,37 +4330,9 @@ const getAssignmentForCell = (
                                 </div>
                               );
                             }
-                            
-                            // Use the exactSlotAssignments we already calculated for this cell
-                            if (exactSlotAssignments.length > 0 && !effectiveViewOnly) {
-                              // Render each assignment as a draggable item
-                              return (
-                                <div className="flex flex-wrap gap-1 justify-center">
-                                  {exactSlotAssignments.map((assignment, idx) => {
-                                    const pharmacist = pharmacists.find(p => p._id === assignment.pharmacistId);
-                                    // Prioritize displayName over name for consistency
-                                    const name = pharmacist?.displayName || pharmacist?.name || 'Unavailable';
-                                    
-                                    return (
-                                      <div 
-                                        key={idx}
-                                        className="bg-red-50 text-red-700 rounded px-1 py-0.5 text-xs flex items-center cursor-grab"
-                                        draggable={!effectiveViewOnly}
-                                        onDragStart={(e) => handleDragStart(e, assignment.pharmacistId, assignment, "Unavailable Pharmacists", isoDate, slot.start, slot.end)}
-                                      >
-                                        {name}
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              );
-                            }
-                            
-                            // For view-only mode or when no exact assignments, show the text
-                            // For displaying text when not showing draggable assignments
-                            // Use the cellKey to check for free text, otherwise show the combined list of unavailable pharmacists
+                            // Show either the free text or the unavailable pharmacist names
                             const cellKey = `unavailable-${isoDate}-${slot.start}-${slot.end}`;
-                            const defaultText = allUnavailablePharmacists.map((p: any) => p.displayName || p.name || 'Unknown').join(', ');
+                            const defaultText = allUnavailablePharmacists.map((p: any) => p.name || p.displayName || 'Unknown').join(', ');
                             return freeCellText[cellKey] || defaultText || '';
                           })()}
                         </td>
@@ -4592,16 +4348,14 @@ const getAssignmentForCell = (
                     date.setDate(date.getDate() + dayOffset);
                     const isoDate = date.toISOString().split('T')[0];
                     return TIME_SLOTS.map((slot, slotIdx) => {
-                       // Find Band 8a pharmacists in Management Time for this date/slot
-                       // Important: Only include assignments with location "Management Time" to avoid duplication with Unavailable row
-                       const managementAssignments = rotaAssignments.filter(a => 
-                         a.type === "management" && 
-                         a.location === "Management Time" && // Add this condition to prevent duplication
-                         a.date === isoDate && 
-                         ((a.startTime <= slot.start && a.endTime > slot.start) || 
-                          (a.startTime < slot.end && a.endTime >= slot.end) ||
-                          (a.startTime >= slot.start && a.endTime <= slot.end))
-                       );
+                      // Find Band 8a pharmacists in Management Time for this date/slot
+                      const managementAssignments = rotaAssignments.filter(a => 
+                        a.type === "management" && 
+                        a.date === isoDate && 
+                        ((a.startTime <= slot.start && a.endTime > slot.start) || 
+                         (a.startTime < slot.end && a.endTime >= slot.end) ||
+                         (a.startTime >= slot.start && a.endTime <= slot.end))
+                      );
                       
                       // Get pharmacist names
                       const pharmacistNames = managementAssignments.map(a => getPharmacistName(a.pharmacistId)).filter(Boolean);
@@ -4636,14 +4390,10 @@ const getAssignmentForCell = (
                                 </div>
                               );
                             }
-                            // Show either the free text, pharmacist names, or a '+' for empty cells to indicate they're editable
+                            // Show either the free text or the pharmacist names
                             const cellKey = `management-${isoDate}-${slot.start}-${slot.end}`;
                             const cellText = freeCellText[cellKey] || (pharmacistNames.length > 0 ? pharmacistNames.join(", ") : "");
-                            return cellText ? 
-                              <span>{cellText}</span> : 
-                              <span className="flex items-center justify-center h-full w-full text-blue-400 font-bold text-lg opacity-50 hover:opacity-100">
-                                +
-                              </span>;
+                            return cellText ? <span>{cellText}</span> : null;
                           })()}
                         </td>
                       );
@@ -4681,11 +4431,8 @@ const getAssignmentForCell = (
             setSelectedCell(null);
           }}
           onSelect={handlePharmacistSelect}
-          onSelectMultiple={handlePharmacistSelectMultiple}
           currentPharmacistId={selectedCell.currentPharmacistId}
           location={selectedCell.location}
-          allowMultipleSelection={selectedCell.location === "Unavailable Pharmacists"}
-          existingPharmacistIds={selectedCell.existingPharmacistIds}
         />
       )}
       {/* Pharmacist Report Modal */}

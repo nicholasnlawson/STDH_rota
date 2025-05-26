@@ -6,7 +6,7 @@ import { useState } from "react";
 interface TechnicianReplacementModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelect: (technicianId: Id<"technicians">, scope: "slot" | "day" | "week") => void;
+  onSelect: (technicianId: Id<"technicians"> | null, scope: "slot" | "day" | "week") => void;
   currentTechnicianId: Id<"technicians"> | null;
   location: string;
   date: string; // Added date for context
@@ -41,9 +41,16 @@ export function TechnicianReplacementModal({
       return nameA.localeCompare(nameB);
     });
 
-  const handleSelect = (technicianId: Id<"technicians">) => {
+  // Handle the selection of a technician or the clearing of an assignment
+  const handleSelect = (technicianId: Id<"technicians"> | null) => {
     onSelect(technicianId, selectedScope);
     onClose(); // Close modal after selection
+  };
+
+  // Special handler for clearing assignments
+  const handleClear = () => {
+    onSelect(null, selectedScope);
+    onClose(); // Close modal after clearing
   };
 
   return (
@@ -93,6 +100,32 @@ export function TechnicianReplacementModal({
         </div>
 
         <div className="flex-1 overflow-y-auto">
+          {/* Clear assignment option */}
+          <div className="mb-4 border-b pb-3">
+            <button
+              onClick={handleClear}
+              className="w-full text-left p-3 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 flex items-center"
+            >
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+              <div>
+                <div className="font-medium text-red-700">Clear Assignment</div>
+                <div className="text-sm text-red-600">
+                  {selectedScope === "week" ? 
+                    "Remove technician from all slots this week" : 
+                    "Remove technician from all slots on this day"}
+                </div>
+                {selectedScope === "slot" && (
+                  <div className="text-xs text-red-500 mt-1">
+                    <span className="font-bold">Note:</span> Clearing affects the entire day, not just this time slot
+                  </div>
+                )}
+              </div>
+            </button>
+          </div>
+          
+          <h3 className="font-medium text-gray-700 mb-2">Select Replacement Technician</h3>
           <div className="space-y-2">
             {filteredTechnicians.map((technician) => (
               <button

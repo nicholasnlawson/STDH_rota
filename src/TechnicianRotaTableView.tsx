@@ -1,6 +1,7 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { format, parseISO, addDays, isSameDay } from 'date-fns';
 import { getTechnicianColor, getContrastColor } from './utils/technicianColors';
+
 
 interface Assignment {
   _id: string; // Unique ID for the assignment itself
@@ -12,6 +13,8 @@ interface Assignment {
   startTime: string;
   technicianId: string;
   technicianName?: string;
+  technicianBand?: string; // Added to support Student Technicians
+  originalLocation?: string; // Added to track original location for Student Technicians
   type: string;
 }
 
@@ -68,23 +71,73 @@ export function TechnicianRotaTableView({
   onDragLeave,
   onDrop
 }: TechnicianRotaTableViewProps) {
-  // Group assignments by location and date
-  const assignmentsByLocation = React.useMemo(() => {
+  // Use the debug utility to check if a technician is a student
+  // This function is imported from StudentTechnicianDebug.ts
+
+  // Group assignments by location and date, with special handling for Student Technicians
+  const [allLoadedLocations] = useState<Set<string>>(() => {
+    // Initialize with the special locations that should always be present
+    return new Set(['Management Time', 'Students', 'Education/Training']);
+  });
+  
+  const assignmentsByLocation = useMemo(() => {
     const locations = new Map<string, Record<string, Assignment[]>>();
     
+    // First, add all previously seen locations to preserve them even when all assignments are cleared
+    allLoadedLocations.forEach((location: string) => {
+      if (!locations.has(location)) {
+        locations.set(location, {});
+      }
+    });
+    
+    // Add the Management Time location if it doesn't exist
+    if (!locations.has('Management Time')) {
+      locations.set('Management Time', {});
+    }
+    
+    // Add the Students location if it doesn't exist
+    if (!locations.has('Students')) {
+      locations.set('Students', {});
+    }
+    
+    // Add the Education/Training location if it doesn't exist
+    if (!locations.has('Education/Training')) {
+      locations.set('Education/Training', {});
+    }
+    
     assignments.forEach(assignment => {
-      if (!locations.has(assignment.location)) {
-        locations.set(assignment.location, {});
+      // Determine where to place this assignment
+      let targetLocation = assignment.location;
+      
+      // If this is a Student Technician and they haven't been manually assigned elsewhere,
+      // For student technicians, respect their assigned location
+      // If they're assigned to a location other than 'Students', keep them there
+      // Otherwise, put them in the 'Students' row
+      if (assignment.technicianBand === 'Student') {
+        targetLocation = assignment.location !== 'Students' ? assignment.location : 'Students';
       }
       
-      const locationAssignments = locations.get(assignment.location)!;
+      // Track this location to preserve it even when all assignments are cleared
+      allLoadedLocations.add(targetLocation);
+      
+      // Ensure the location exists in our map
+      if (!locations.has(targetLocation)) {
+        locations.set(targetLocation, {});
+      }
+      
+      const locationAssignments = locations.get(targetLocation)!;
       const date = format(parseISO(assignment.date), 'yyyy-MM-dd');
       
       if (!locationAssignments[date]) {
         locationAssignments[date] = [];
       }
       
-      locationAssignments[date].push(assignment);
+      locationAssignments[date].push({
+        ...assignment,
+        // Store the original location for Student Technicians
+        originalLocation: assignment.technicianBand === 'Student' && assignment.location !== 'Students' ? 
+          assignment.location : undefined
+      });
     });
     
     return locations;
@@ -120,8 +173,22 @@ export function TechnicianRotaTableView({
   };
 
   // Get unique locations and sort them in the specified order
-  const locations = Array.from(assignmentsByLocation.keys()).sort((a, b) => {
-    // Category 5: Management Time (always last)
+  // Create a separate entry for Students if not already present
+if (!assignmentsByLocation.has('Students')) {
+  assignmentsByLocation.set('Students', {});
+}
+
+const locations = Array.from(assignmentsByLocation.keys()).sort((a, b) => {
+    // Special categories that are always positioned at the end
+    // Category 6: Students (third to last)
+    if (a === 'Students') return 1;
+    if (b === 'Students') return -1;
+    
+    // Category 7: Education/Training (second to last)
+    if (a === 'Education/Training') return 1;
+    if (b === 'Education/Training') return -1;
+    
+    // Category 8: Management Time (always last)
     if (a === 'Management Time') return 1;
     if (b === 'Management Time') return -1;
 
@@ -140,7 +207,16 @@ export function TechnicianRotaTableView({
             return 3;
         }
         // Category 4: Other
-        return 4;
+        if (lowerLoc === 'students') {
+            return 5; // Students category (will be positioned after Other)
+        }
+        if (lowerLoc === 'education/training') {
+            return 6; // Education/Training category (positioned after Students)
+        }
+        if (lowerLoc === 'management time') {
+            return 7; // Management Time (always last)
+        }
+        return 4; // Other categories
     };
 
     const priorityA = getLocationPriority(a);
@@ -246,6 +322,7 @@ export function TechnicianRotaTableView({
                               return (
                                 <div 
                                   key={uniqueKey}
+                                  className={`technician-cell-content print-table-cell ${!isViewOnly ? 'cursor-pointer hover:opacity-80' : ''}`}
                                   style={{
                                     backgroundColor: bgColor,
                                     color: textColor,
@@ -257,7 +334,7 @@ export function TechnicianRotaTableView({
                                     textAlign: 'center',
                                     width: '100%',
                                     minHeight: '1.5em', 
-                                    display: 'flex',
+                                    display: 'flex', // Only for screen; print CSS will override
                                     alignItems: 'center',
                                     justifyContent: 'center',
                                     boxSizing: 'border-box',
@@ -268,8 +345,10 @@ export function TechnicianRotaTableView({
                                     flexGrow: 1,
                                     flexShrink: 0,
                                     flexBasis: `${100 / slotAssignments.length}%`,
+                                    /* Enhanced PDF-compatible centering */
+                                    position: 'relative',
+                                    verticalAlign: 'middle',
                                   }}
-                                  className={`${!isViewOnly ? 'cursor-pointer hover:opacity-80' : ''}`}
                                   draggable={!isViewOnly && !!assignment.technicianId}
                                   onDragStart={(e) => {
                                     if (!isViewOnly && onDragStart && assignment.technicianId) {
@@ -329,7 +408,9 @@ export function TechnicianRotaTableView({
                                     }
                                   }}
                                 >
-                                  {assignment.technicianName || assignment.technicianId || 'Unassigned'}
+                                  {assignment.location === 'Students' && assignment.originalLocation
+                                    ? `${assignment.technicianName || 'Student'} (${assignment.originalLocation})` 
+                                    : (assignment.technicianName || assignment.technicianId || 'Unassigned')}
                                 </div>
                               );
                             })}

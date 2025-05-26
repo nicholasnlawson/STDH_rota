@@ -17,11 +17,12 @@ function shuffleArray<T>(array: T[]): T[] {
 
 type Assignment = {
   pharmacistId: Id<"pharmacists">;
-  type: "ward" | "dispensary" | "clinic" | "management";
+  type: "ward" | "dispensary" | "clinic" | "management" | "unavailable";
   location: string;
   startTime: string;
   endTime: string;
   isLunchCover?: boolean;
+  reason?: string; // For storing reason for unavailability
 };
 
 type Conflict = {
@@ -57,14 +58,23 @@ export const generateRota = internalMutation({
       args.pharmacistIds.map(id => ctx.db.get(id))
     );
     const directorates = await ctx.db.query("directorates").collect();
+    // Get the list of applicable clinics based on the clinicIds parameter
     const allClinics = await ctx.db.query("clinics")
       .filter(q => q.and(q.eq(q.field("isActive"), true)))
       .collect();
-    let clinics;
-    if (Array.isArray(args.clinicIds) && args.clinicIds.length > 0) {
-      clinics = allClinics.filter(c => args.clinicIds?.includes(c._id));
+    let clinics: Doc<"clinics">[] = [];
+    // Only process clinics if they are explicitly provided
+    // This allows for intentionally creating a rota with no clinics
+    if (Array.isArray(args.clinicIds)) {
+      if (args.clinicIds.length > 0) {
+        // User has selected specific clinics
+        clinics = allClinics.filter(c => args.clinicIds?.includes(c._id));
+      } else {
+        // User has intentionally selected no clinics
+        clinics = [];
+      }
     } else {
-      // Use clinics marked as includeByDefaultInRota
+      // Backward compatibility: use clinics marked as includeByDefaultInRota
       clinics = allClinics.filter(c => c.includeByDefaultInRota);
     }
     // --- ROTA GENERATION STARTS HERE ---
@@ -3641,15 +3651,75 @@ for (const p of unassignedNonDefault8a) {
       await ctx.db.delete(r._id);
     }
     // --- END Ensure only one rota per date ---
-    return await ctx.db.insert("rotas", {
+    // Extract ad-hoc unavailable rules for this specific day
+    const dateObj = new Date(args.date);
+    const dayOfWeekNames = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+    const currentDayLabel = dayOfWeekNames[dateObj.getDay()];
+    
+    // Format as the rotaUnavailableRules format expected by the frontend
+    // Store both the rules and a simple array of pharmacist IDs for convenience
+    const unavailablePharmacists: string[] = [];
+    const rotaUnavailableRules: Record<string, { dayOfWeek: string, startTime: string, endTime: string }[]> = {};
+    
+    // Process all pharmacists that have unavailable rules for this day
+    if (args.effectiveUnavailableRules) {
+      Object.entries(args.effectiveUnavailableRules).forEach(([pharmacistId, rules]) => {
+        // Filter to rules just for this day
+        const rulesForToday = rules.filter(rule => rule.dayOfWeek === currentDayLabel);
+        
+        if (rulesForToday.length > 0) {
+          // Store in our helper fields
+          rotaUnavailableRules[pharmacistId] = rulesForToday;
+          unavailablePharmacists.push(pharmacistId);
+          
+          // UNIFIED MODEL: Also create an "unavailable" assignment for each rule
+          rulesForToday.forEach(rule => {
+            // Add an assignment of type "unavailable" to the assignments array
+            assignments.push({
+              type: "unavailable", // Now valid in our schema
+              pharmacistId: pharmacistId as Id<"pharmacists">,
+              startTime: rule.startTime,
+              endTime: rule.endTime,
+              location: "Ad-hoc unavailable",
+              reason: "ad-hoc"
+            });
+            
+            console.log(`[generateRota] Added unavailable assignment for ${pharmacistId} from ${rule.startTime} to ${rule.endTime} on ${args.date}`);
+          });
+        }
+      });
+    }
+    
+    console.log(`[generateRota] Found ${unavailablePharmacists.length} ad-hoc unavailable pharmacists for ${args.date} (${currentDayLabel})`);
+    // Need to use any type here to allow for "unavailable" type in the filter
+    const unavailableAssignments = assignments.filter((a: any) => a.type === "unavailable");
+    console.log(`[generateRota] Added ${unavailableAssignments.length} unavailable assignments to assignments array`);
+    
+    // Create the rota document with all fields
+    // Using any type to allow adding custom fields
+    const rotaDocument: any = {
       date: args.date,
-      assignments: assignments as { type: "ward" | "dispensary" | "clinic" | "management"; startTime: string; endTime: string; pharmacistId: Id<"pharmacists">; location: string; isLunchCover?: boolean }[],
+      // Now assignments array includes both regular assignments and unavailable slots
+      assignments: assignments as { 
+        type: "ward" | "dispensary" | "clinic" | "management" | "unavailable"; 
+        startTime: string; 
+        endTime: string; 
+        pharmacistId: Id<"pharmacists">; 
+        location: string; 
+        isLunchCover?: boolean;
+        reason?: string;
+      }[],
       status: "draft",
       generatedBy: "system",
       generatedAt: Date.now(),
       includedWeekdays: args.includedWeekdays, // Store which weekdays were included in rota generation
       conflicts,
-    });
+      // We'll keep these fields for backward compatibility
+      unavailablePharmacists, // Simple list of IDs
+      rotaUnavailableRules, // Full rules in same format as frontend state
+    };
+    
+    return await ctx.db.insert("rotas", rotaDocument);
   },
 });
 
@@ -4288,9 +4358,34 @@ export const publishRota = mutation({
         // Create a new document that is a carbon copy, but with published status
         console.log(`[publishRota] Creating carbon copy of rota ${rota._id} for date ${rota.date}`);
         
+        // DETAILED LOGGING: Check if the original rota has ad-hoc unavailable data
+        const hasUnavailablePharmacists = rota.unavailablePharmacists && Array.isArray(rota.unavailablePharmacists) && rota.unavailablePharmacists.length > 0;
+        const hasRotaUnavailableRules = rota.rotaUnavailableRules && typeof rota.rotaUnavailableRules === 'object' && Object.keys(rota.rotaUnavailableRules || {}).length > 0;
+        
+        console.log(`[publishRota] ORIGINAL ROTA DATA CHECK for ${rota._id}:`);
+        console.log(`[publishRota] - Has unavailablePharmacists array: ${hasUnavailablePharmacists ? 'YES' : 'NO'}`);
+        if (hasUnavailablePharmacists && rota.unavailablePharmacists) {
+          console.log(`[publishRota] - unavailablePharmacists count: ${rota.unavailablePharmacists.length}`);
+          console.log(`[publishRota] - unavailablePharmacists: ${JSON.stringify(rota.unavailablePharmacists)}`);
+        }
+        console.log(`[publishRota] - Has rotaUnavailableRules: ${hasRotaUnavailableRules ? 'YES' : 'NO'}`);
+        if (hasRotaUnavailableRules && rota.rotaUnavailableRules) {
+          console.log(`[publishRota] - rotaUnavailableRules pharmacist count: ${Object.keys(rota.rotaUnavailableRules || {}).length}`);
+          console.log(`[publishRota] - rotaUnavailableRules keys: ${JSON.stringify(Object.keys(rota.rotaUnavailableRules || {}))}`);
+        }
+        
         // Create a new rota document with all the same data plus publication metadata
         // Extract fields from the original rota, excluding _id and _creationTime
         const { _id, _creationTime, ...rotaData } = rota;
+        
+        // DETAILED LOGGING: Check if the spread data has ad-hoc unavailable data
+        console.log(`[publishRota] SPREAD DATA CHECK:`);
+        console.log(`[publishRota] - rotaData has unavailablePharmacists: ${rotaData.unavailablePharmacists ? 'YES' : 'NO'}`);
+        console.log(`[publishRota] - rotaData has rotaUnavailableRules: ${rotaData.rotaUnavailableRules ? 'YES' : 'NO'}`);
+        
+        // Ensure both fields are carried over - add explicit access to make sure
+        const unavailablePharmacists = rotaData.unavailablePharmacists || [];
+        const rotaUnavailableRules = rotaData.rotaUnavailableRules || {};
         
         const newRotaId = await ctx.db.insert("rotas", {
           ...rotaData,      // Copy all relevant fields from original
@@ -4300,8 +4395,23 @@ export const publishRota = mutation({
           publishedAt: publishedAt,
           publishDate: formattedDate,
           publishTime: formattedTime,
-          publishedSetId: publishedSetId  // Track which published set this belongs to
+          publishedSetId: publishedSetId,  // Track which published set this belongs to
+          // EXPLICITLY include these fields to ensure they're carried over
+          unavailablePharmacists,
+          rotaUnavailableRules
         });
+        
+        // DETAILED LOGGING: Verify the published rota has the correct data
+        const publishedRota = await ctx.db.get(newRotaId);
+        console.log(`[publishRota] PUBLISHED ROTA CHECK for ${newRotaId}:`);
+        console.log(`[publishRota] - Has unavailablePharmacists: ${publishedRota?.unavailablePharmacists ? 'YES' : 'NO'}`);
+        if (publishedRota?.unavailablePharmacists) {
+          console.log(`[publishRota] - Published unavailablePharmacists count: ${publishedRota.unavailablePharmacists.length}`);
+        }
+        console.log(`[publishRota] - Has rotaUnavailableRules: ${publishedRota?.rotaUnavailableRules ? 'YES' : 'NO'}`);
+        if (publishedRota?.rotaUnavailableRules) {
+          console.log(`[publishRota] - Published rotaUnavailableRules keys count: ${Object.keys(publishedRota.rotaUnavailableRules).length}`);
+        }
         
         publishedRotaIds.push(newRotaId);
       }

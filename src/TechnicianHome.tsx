@@ -18,7 +18,7 @@ export function TechnicianHome({ isAdmin, userEmail }: TechnicianHomeProps) {
   const currentTechnician = technicians.find((t: Doc<"technicians">) => t.email === userEmail);
   
   return (
-    <main className="container mx-auto p-4">
+    <main className="">
       <div className="min-h-screen">
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-3xl font-bold">Pharmacy Technician Rota Management</h1>

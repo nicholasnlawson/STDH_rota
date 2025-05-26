@@ -42,7 +42,7 @@ const applicationTables = {
     displayName: v.optional(v.string()), // How the name appears in the rota
     email: v.string(), // Required for authentication
     password: v.optional(v.string()), // Store password for authentication
-    band: v.string(), // Band 4, 5, or 6
+    band: v.string(), // Band 4, 5, 6, or Student
     primaryWards: v.array(v.string()), // Primary wards assigned
     isAccuracyChecker: v.boolean(), // Whether technician is an accuracy checker
     isMedsRecTrained: v.boolean(), // Whether technician is medication reconciliation trained
@@ -103,11 +103,12 @@ const applicationTables = {
     assignments: v.array(
       v.object({
         pharmacistId: v.id("pharmacists"),
-        type: v.union(v.literal("ward"), v.literal("dispensary"), v.literal("clinic"), v.literal("management")),
+        type: v.union(v.literal("ward"), v.literal("dispensary"), v.literal("clinic"), v.literal("management"), v.literal("unavailable")),
         location: v.string(),
         startTime: v.string(),
         endTime: v.string(),
         isLunchCover: v.optional(v.boolean()),
+        reason: v.optional(v.string()), // Allow reason field for unavailable assignments
       })
     ),
     // Store free text edits (key-value pairs where key is cellId and value is text)
@@ -125,6 +126,12 @@ const applicationTables = {
     publishedSetId: v.optional(v.string()), // ID to group published rotas by set
     originalRotaId: v.optional(v.id("rotas")), // Reference to the original rota
     lastEdited: v.optional(v.string()), // Timestamp of the last edit
+    unavailablePharmacists: v.optional(v.array(v.string())), // List of pharmacist IDs that are unavailable for this day
+    rotaUnavailableRules: v.optional(v.record(v.string(), v.array(v.object({
+      dayOfWeek: v.string(),
+      startTime: v.string(),
+      endTime: v.string()
+    })))), // Ad-hoc unavailable rules in the same format as expected by the frontend
     conflicts: v.optional(v.array(
       v.object({
         type: v.string(),
@@ -201,6 +208,8 @@ const technicianRequirementsTables = {
         startTime: v.string(), // Start time (HH:MM format)
         endTime: v.string(), // End time (HH:MM format)
         category: v.optional(v.string()), // Assignment category
+        technicianBand: v.optional(v.string()), // Band of the technician (for student tracking)
+        originalLocation: v.optional(v.string()), // Original location before any UI adjustments
       })
     ),
     conflicts: v.array(

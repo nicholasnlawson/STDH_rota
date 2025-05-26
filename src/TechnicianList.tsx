@@ -29,7 +29,7 @@ export function TechnicianList({ isAdmin, userEmail }: TechnicianListProps) {
     name: string; // Full name
     displayName: string; // "Appears in rota as"
     email: string; // Required for authentication
-    band: string; // Band 4, 5, or 6
+    band: string; // Band 4, 5, 6, or Student
     primaryWards: string[]; // Primary wards assigned
     isAccuracyChecker: boolean; // Whether technician is an accuracy checker
     isMedsRecTrained: boolean; // Whether technician is medication reconciliation trained
@@ -227,6 +227,7 @@ export function TechnicianList({ isAdmin, userEmail }: TechnicianListProps) {
                   <option value="4">Band 4</option>
                   <option value="5">Band 5</option>
                   <option value="6">Band 6</option>
+                  <option value="Student">Student</option>
                 </select>
               </div>
             </div>
@@ -510,6 +511,7 @@ export function TechnicianList({ isAdmin, userEmail }: TechnicianListProps) {
                     <option value="4">Band 4</option>
                     <option value="5">Band 5</option>
                     <option value="6">Band 6</option>
+                    <option value="Student">Student</option>
                   </select>
                 </div>
               </div>

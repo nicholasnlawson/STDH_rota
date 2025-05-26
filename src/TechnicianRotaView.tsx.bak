@@ -239,8 +239,6 @@ export function TechnicianRotaView({
   const [isPublishing, setIsPublishing] = useState(false);
   const [hasExistingConfig, setHasExistingConfig] = useState(false);
   const [publishSuccess, setPublishSuccess] = useState(false);
-  const [selectedTechnicianForReport, setSelectedTechnicianForReport] = useState<Id<"technicians"> | null>(null);
-  const [showTechnicianReport, setShowTechnicianReport] = useState(false);
 
   // State for manual editing
   const [selectedTechnicianCell, setSelectedTechnicianCell] = useState<{
@@ -290,18 +288,10 @@ export function TechnicianRotaView({
     console.log("Cell clicked details:", details);
     
     // SPECIAL CASE: For Management Time cells, we don't open the technician selection modal
-    // The Management Time row needs special handling
+    // The Management Time row is edited directly in the RotaView component using the createCellTextInput function
     if (details.location === "Management Time") {
-      // Check if this is an empty cell (no technician assigned)
-      const isEmptyCell = !details.assignment.technicianId;
-      
-      if (isEmptyCell) {
-        console.log("Clicked on empty Management Time cell - showing technician selection modal");
-        // Continue with the normal flow to show the technician selection modal
-      } else {
-        console.log("Clicked on Management Time cell with existing technician - skipping technician selection modal");
-        return;
-      }
+      console.log("Clicked on Management Time cell - skipping technician selection modal");
+      return;
     }
     
     console.log("Current rotaIdsByDate:", rotaIdsByDate);
@@ -516,14 +506,13 @@ export function TechnicianRotaView({
     console.log(`Swapping technicians: ${sourceTechnicianId} -> ${targetTechnicianId || 'empty'} and ${targetTechnicianId || 'empty'} -> ${sourceTechnicianId}`);
     console.log(`Swap scope: ${scope}`);
     
-    // SPECIAL CASE: Handle Management Time and Education/Training cells differently
+    // SPECIAL CASE: Handle Management Time cells differently
     const isTargetManagementTime = targetLocation === "Management Time";
-    const isTargetEducationTraining = targetLocation === "Education/Training";
     
-    if (isTargetManagementTime || isTargetEducationTraining) {
-      console.log(`Target location is ${targetLocation} - creating a special assignment`);
+    if (isTargetManagementTime) {
+      console.log(`Target location is Management Time - creating a management time assignment`);
       
-      // Always use day scope for special rows to ensure consistent behavior
+      // Always use day scope for Management Time to ensure consistent behavior
       // This makes it so dragging any slot (morning or afternoon) affects the full day
       const effectiveScope = "day";
       
@@ -534,64 +523,61 @@ export function TechnicianRotaView({
         throw new Error(`No rota ID found for target date ${targetDate}`);
       }
       
-      // Determine the assignment type based on the target location
-      const assignmentType = isTargetManagementTime ? "management" : "education";
-      
-      // Always create special assignments for the full day (both morning and afternoon)
+      // Always create Management Time assignments for the full day (both morning and afternoon)
       // First, create morning assignment (9:00-13:00)
       await updateRotaAssignment({
         rotaId: targetRotaIdFromDate,
-        location: targetLocation,
+        location: "Management Time",
         startTime: "09:00",
         endTime: "13:00",
-        // Don't provide originalTechnicianId for new special assignments
+        // Don't provide originalTechnicianId for new Management Time assignments
         newTechnicianId: sourceTechnicianId,
-        type: assignmentType, // Explicitly set type based on the location
+        type: "management", // Explicitly set type to management for Management Time
       });
       
       // Then, create afternoon assignment (13:00-17:00)
       await updateRotaAssignment({
         rotaId: targetRotaIdFromDate,
-        location: targetLocation,
+        location: "Management Time",
         startTime: "13:00",
         endTime: "17:00",
-        // Don't provide originalTechnicianId for new special assignments
+        // Don't provide originalTechnicianId for new Management Time assignments
         newTechnicianId: sourceTechnicianId,
-        type: assignmentType, // Explicitly set type based on the location
+        type: "management", // Explicitly set type to management for Management Time
       });
       
-      // When a technician is moved to a special row, we need to update the UI immediately
+      // When a technician is moved to Management Time, we need to update the UI immediately
       // This adds the assignment to our local state and removes the original assignment
       setRotaAssignments(prev => {
         // First filter out the original assignment(s) from the source location
-        // Always use day scope for special rows (remove all assignments for this technician at this location for this day)
+        // Always use day scope for Management Time (remove all assignments for this technician at this location for this day)
         const filteredAssignments = prev.filter(a => 
           !(a.technicianId === sourceTechnicianId && 
             a.location === sourceLocation && 
             a.date === sourceDate)
         );
         
-        // Then add the new special assignments for both morning and afternoon
+        // Then add the new Management Time assignments for both morning and afternoon
         return [
           ...filteredAssignments,
           // Morning assignment
           {
             technicianId: sourceTechnicianId,
-            location: targetLocation,
+            location: "Management Time",
             date: targetDate,
             startTime: "09:00",
             endTime: "13:00",
-            type: assignmentType,
+            type: "management",
             rotaId: targetRotaIdFromDate
           },
           // Afternoon assignment
           {
             technicianId: sourceTechnicianId,
-            location: targetLocation,
+            location: "Management Time",
             date: targetDate,
             startTime: "13:00",
             endTime: "17:00",
-            type: assignmentType,
+            type: "management",
             rotaId: targetRotaIdFromDate
           }
         ];
@@ -600,8 +586,8 @@ export function TechnicianRotaView({
       // Now update the source assignment (remove the technician from the original location)
       let sourceResult;
       
-      // Always use day scope for special row operations
-      console.log(`Performing full-day update for source date ${sourceDate} (${targetLocation} assignment)`);
+      // Always use day scope for Management Time operations
+      console.log(`Performing full-day update for source date ${sourceDate} (Management Time assignment)`);
       
       // Get the rota ID for the source date
       const sourceRotaIdFromDate = rotaIdsByDate[sourceDate];
@@ -610,13 +596,13 @@ export function TechnicianRotaView({
         throw new Error(`No rota ID found for source date ${sourceDate}`);
       }
       
-      // Use updateMultipleAssignments to handle the source update
+      // For the source technician: remove them from the original location for the entire day
       sourceResult = await updateMultipleAssignments({
         rotaIdsByDate: { [sourceDate]: sourceRotaIdFromDate },
         location: sourceLocation,
         date: sourceDate,
         originalTechnicianId: sourceTechnicianId,
-        // Don't provide newTechnicianId to remove the technician
+        // Don't provide newTechnicianId to remove the assignment
         scope: "day",
         respectEAU: true
       });
@@ -832,7 +818,7 @@ export function TechnicianRotaView({
   };
 
   // Handler for when a new technician is selected in the replacement modal
-  const handleTechnicianReplacementSelect = useCallback(async (newTechnicianId: Id<"technicians"> | null, scope: "slot" | "day" | "week") => {
+  const handleTechnicianReplacementSelect = useCallback(async (newTechnicianId: Id<"technicians">, scope: "slot" | "day" | "week") => {
     if (!selectedTechnicianCell) {
       console.error("No technician cell selected for replacement.");
       return;
@@ -840,12 +826,12 @@ export function TechnicianRotaView({
 
     const { rotaId, location, date, startTime, endTime, currentTechnicianId: originalTechnicianId, assignmentId } = selectedTechnicianCell;
 
-    // Check if this is an empty cell (no original technician)
-    const isEmptyCell = !originalTechnicianId;
+    // Handle empty cells (no originalTechnicianId) differently
+    // In this case, we're creating a new assignment rather than replacing an existing one
+    const isNewAssignment = !originalTechnicianId;
     
-    if (isEmptyCell) {
-      console.log("Empty cell detected - adding new technician assignment");
-      // For empty cells, we'll add a new assignment instead of replacing an existing one
+    if (isNewAssignment) {
+      console.log("Creating new assignment for empty cell");
     }
 
     // Get a valid rotaId - either from the selectedTechnicianCell or find one
@@ -857,10 +843,6 @@ export function TechnicianRotaView({
       console.log("Available rotaIdsByDate:", rotaIdsByDate);
       
       // First try to get it from rotaIdsByDate using the date
-      if (date) {
-        effectiveRotaId = rotaIdsByDate[date];
-      }
-      
       // If still not found, check if it's in the published rota
       if (!effectiveRotaId && publishedRota && publishedRota.date === date) {
         effectiveRotaId = publishedRota._id;
@@ -892,124 +874,53 @@ export function TechnicianRotaView({
     console.log(`  Cell details: Location: ${location}, Date: ${date}, StartTime: ${startTime}`);
 
     try {
-      if (scope === "slot") {
-        console.log(`Making slot mutation call with rotaId: ${effectiveRotaId}`);
+      // Different code path for new assignments vs replacing existing ones
+      if (isNewAssignment) {
+        console.log(`Creating new assignment with rotaId: ${effectiveRotaId}`);
+        // For new assignments, we don't need to provide originalTechnicianId
+        const result = await updateRotaAssignment({
+          rotaId: effectiveRotaId,
+          location,
+          startTime,
+          endTime: endTime || (startTime === "09:00" ? "13:00" : "17:00"), // Default end times
+          newTechnicianId,
+          type: "requirement", // Default type for new assignments
+        });
         
-        // Declare result outside the if-else to fix scope issues
-        let result;
-        
-        // If newTechnicianId is null, we're clearing the assignment
-        if (newTechnicianId === null) {
-          console.log(`Clearing technician assignment for: ${location}, ${date}, ${startTime}`);
+        if (result && result.success) {
+          console.log("New assignment created successfully:", result);
           
-          // For clearing assignments, we need the original technician ID
-          if (!originalTechnicianId) {
-            console.log("Cannot clear an empty cell");
-            return;
-          }
-          
-          // For single slots, we need to handle them differently
-          if (scope === "slot") {
-            console.log(`Using single slot approach with exact time matching: ${startTime}-${endTime}`);
-            // For clearing single slots, use updateMultipleAssignments but with a targeted approach
-            // by specifying exact startTime and endTime in the location field
-            const targetLocation = `${location}|${startTime}-${endTime}`; // Include time info in location
-            console.log(`Using targeted location with time info: ${targetLocation}`);
-            
-            result = await updateMultipleAssignments({
-              rotaIdsByDate: { [date]: effectiveRotaId },
-              location: targetLocation, // Include time info to be more specific
-              date,
-              originalTechnicianId: originalTechnicianId as Id<"technicians">,
-              scope: "day" // Use day scope but with specific time in location
-            });
-          } else {
-            // For day and week scope, use updateMultipleAssignments
-            result = await updateMultipleAssignments({
-              rotaIdsByDate: { [date]: effectiveRotaId },
+          // Update the local state to reflect the new assignment
+          setRotaAssignments(prevAssignments => [
+            ...prevAssignments,
+            {
+              technicianId: newTechnicianId,
               location,
               date,
-              originalTechnicianId: originalTechnicianId as Id<"technicians">,
-              // newTechnicianId is optional in updateMultipleAssignments
-              scope: scope
-            });
-          }
+              startTime,
+              endTime: endTime || (startTime === "09:00" ? "13:00" : "17:00"),
+              type: "requirement",
+              rotaId: effectiveRotaId
+            }
+          ]);
         }
-        // Handle empty cells differently - no need for originalTechnicianId
-        else if (isEmptyCell) {
-          console.log(`Adding new technician to empty cell: ${location}, ${date}, ${startTime}`);
-          result = await updateRotaAssignment({
-            rotaId: effectiveRotaId,
-            location,
-            startTime,
-            endTime,
-            // No originalTechnicianId for empty cells
-            newTechnicianId,
-            type: "requirement" // Default to requirement type for new assignments
-          });
-        } else {
-          // For cells with existing technicians, do a replacement
-          result = await updateRotaAssignment({
-            rotaId: effectiveRotaId,
-            location,
-            startTime,
-            endTime,
-            originalTechnicianId: originalTechnicianId as Id<"technicians">, // Type assertion to fix TS error
-            newTechnicianId,
-          });
-        }
+      }
+      else if (scope === "slot") {
+        console.log(`Making slot mutation call with rotaId: ${effectiveRotaId}`);
+        const result = await updateRotaAssignment({
+          rotaId: effectiveRotaId,
+          location,
+          startTime,
+          endTime,
+          originalTechnicianId: originalTechnicianId!, // Use non-null assertion since we know it exists in this branch
+          newTechnicianId,
+        });
         
         if (result && result.success) {
           console.log("Technician replacement successful for slot:", result);
           
           // Update the local state to reflect the change
           setRotaAssignments(prevAssignments => {
-            // If newTechnicianId is null, we're clearing the assignment
-            if (newTechnicianId === null) {
-              console.log(`Removing assignment from UI state: ${location}, ${date}, ${startTime}`);
-              // Log details of what we're trying to remove
-              console.log(`Assignments before removal:`, prevAssignments.length);
-              console.log(`Looking for: location=${location}, date=${date}, startTime=${startTime}, technicianId=${originalTechnicianId}`);
-              
-              // Filter out the assignment that matches the criteria
-              const updatedAssignments = prevAssignments.filter(assignment => {
-                const matchesLocation = assignment.location === location;
-                const matchesDate = assignment.date === date;
-                const matchesTime = assignment.startTime === startTime;
-                const matchesTechnician = assignment.technicianId === originalTechnicianId;
-                
-                // Log any close matches for debugging
-                if (matchesLocation && matchesDate && (matchesTechnician || matchesTime)) {
-                  console.log(`Close match found:`, assignment);
-                }
-                
-                // Don't remove the assignment if it doesn't match our criteria
-                return !(matchesLocation && matchesDate && matchesTime && matchesTechnician);
-              });
-              
-              console.log(`Assignments after removal:`, updatedAssignments.length);
-              return updatedAssignments;
-            }
-            // Special handling for empty cells - we need to add a new assignment to the UI state
-            if (isEmptyCell) {
-              console.log(`Adding new assignment to UI state for empty cell: ${location}, ${date}, ${startTime}`);
-              // Create a new assignment object for the UI
-              const newAssignment = {
-                location: location,
-                date: date,
-                startTime: startTime,
-                endTime: endTime || (startTime === "09:00" ? "13:00" : "17:00"),
-                technicianId: newTechnicianId,
-                // Add any other required fields for UI rendering
-                type: location === "Management Time" ? "management" : "requirement",
-                category: location.toLowerCase().includes("ward") ? "Ward" : ""
-              };
-              
-              // Return the previous assignments plus the new one
-              return [...prevAssignments, newAssignment];
-            }
-            
-            // For existing assignments (not empty cells), proceed with normal update logic
             // First, check if we need to handle a specific half-day slot
             let found = false;
             let updatedAssignments = prevAssignments.map(assignment => {
@@ -1113,23 +1024,6 @@ export function TechnicianRotaView({
                     return assignment;
                   });
                 }
-                
-                // If we still haven't found a match and this isn't an empty cell,
-                // we might need to add a new assignment to the UI state
-                if (!found && !isEmptyCell) {
-                  console.log(`No matching assignment found in UI state, may need to add a new one`);
-                  const newAssignment = {
-                    location: location,
-                    date: date,
-                    startTime: startTime,
-                    endTime: endTime || (startTime === "09:00" ? "13:00" : "17:00"),
-                    technicianId: newTechnicianId,
-                    // Add any other required fields for UI rendering
-                    type: location === "Management Time" ? "management" : "requirement",
-                    category: location.toLowerCase().includes("ward") ? "Ward" : ""
-                  };
-                  updatedAssignments.push(newAssignment);
-                }
               }
             }
             
@@ -1144,135 +1038,78 @@ export function TechnicianRotaView({
       else if (scope === "day") {
         console.log(`Making day-scope mutation call for date: ${date}`);
         
-        // Declare result outside the if-else to fix scope issues
-        let result: any;
-        
-        // If newTechnicianId is null, we're clearing assignments for the day
-        if (newTechnicianId === null) {
-          console.log(`Clearing technician assignments for day: ${date}, location: ${location}`);
+        // Handle empty cells differently for day scope
+        if (isNewAssignment) {
+          console.log(`Creating new assignments for empty cell with day scope`);
           
-          // For clearing assignments, we need the original technician ID
-          if (!originalTechnicianId) {
-            console.log("Cannot clear assignments for an empty cell");
-            return;
-          }
-          
-          // Use updateMultipleAssignments to clear assignments for this day
-          result = await updateMultipleAssignments({
-            rotaIdsByDate: { [date]: effectiveRotaId },
-            location, // Only clear assignments for this location
-            date,
-            originalTechnicianId: originalTechnicianId as Id<"technicians">,
-            // newTechnicianId is optional in updateMultipleAssignments for clearing
-            scope: "day"
-          });
-        }
-        // For empty cells with day scope, we'll add both morning and afternoon assignments
-        else if (isEmptyCell) {
-          console.log(`Adding new technician to empty cell for full day: ${location}, ${date}`);
-          
-          // Determine the assignment type based on location
-          let assignmentType = "requirement";
-          if (location === "Management Time") assignmentType = "management";
-          if (location === "Education/Training") assignmentType = "education";
-          if (location.toLowerCase().includes("clinic")) assignmentType = "clinic";
-          if (location.toLowerCase().includes("dispensary")) assignmentType = "dispensary";
-          
-          // Add morning assignment (9:00-13:00)
+          // Create morning assignment (9:00-13:00)
           const morningResult = await updateRotaAssignment({
             rotaId: effectiveRotaId,
             location,
             startTime: "09:00",
             endTime: "13:00",
-            // No originalTechnicianId for empty cells
             newTechnicianId,
-            type: assignmentType
+            type: "requirement",
           });
           
-          // Add afternoon assignment (13:00-17:00)
+          // Create afternoon assignment (13:00-17:00)
           const afternoonResult = await updateRotaAssignment({
             rotaId: effectiveRotaId,
             location,
             startTime: "13:00",
             endTime: "17:00",
-            // No originalTechnicianId for empty cells
             newTechnicianId,
-            type: assignmentType
+            type: "requirement",
           });
           
-          // Combine results
-          result = {
-            success: morningResult.success && afternoonResult.success,
-            message: `Added technician to ${location} for full day`
-          };
-        } else {
-          // For cells with existing technicians, do a replacement
-          result = await updateMultipleAssignments({
+          // Update local state with new assignments
+          setRotaAssignments(prevAssignments => [
+            ...prevAssignments,
+            // Morning assignment
+            {
+              technicianId: newTechnicianId,
+              location,
+              date,
+              startTime: "09:00",
+              endTime: "13:00",
+              type: "requirement",
+              rotaId: effectiveRotaId
+            },
+            // Afternoon assignment
+            {
+              technicianId: newTechnicianId,
+              location,
+              date,
+              startTime: "13:00",
+              endTime: "17:00",
+              type: "requirement",
+              rotaId: effectiveRotaId
+            }
+          ]);
+          
+          // Close the modal after creating assignments
+          setShowTechnicianReplacementModal(false);
+          setSelectedTechnicianCell(null);
+          return;
+        }
+        // For existing assignments, use updateMultipleAssignments
+        else {
+          // For day scope, we need to update all assignments for this technician on this date
+          const result = await updateMultipleAssignments({
             rotaIdsByDate: { [date]: effectiveRotaId },
             location, // Optional - if provided, only update assignments for this location
             date,
-            originalTechnicianId: originalTechnicianId as Id<"technicians">, // Type assertion to fix TS error
+            originalTechnicianId: originalTechnicianId!, // Use non-null assertion
             newTechnicianId,
             scope: "day",
             respectEAU: true // Respect EAU special rules
           });
-        }
         
         if (result && result.success) {
           console.log("Technician replacement successful for day:", result);
           
           // Update the local state to reflect all changes for this day
           setRotaAssignments(prevAssignments => {
-            // If newTechnicianId is null, we're clearing assignments for the day
-            if (newTechnicianId === null) {
-              console.log(`Removing assignments from UI state for day: ${date}, location: ${location}`);
-              // Filter out all assignments for this technician on this day at this location
-              return prevAssignments.filter(assignment => {
-                // If location is specified, only remove assignments for that location
-                const locationMatches = !location || assignment.location === location;
-                // Don't remove the assignment if it doesn't match our criteria
-                return !(assignment.date === date && 
-                         locationMatches &&
-                         assignment.technicianId === originalTechnicianId);
-              });
-            }
-            // For empty cells, we need to add new assignments to the UI state
-            if (isEmptyCell) {
-              console.log(`Adding new assignments to UI state for empty cell (day scope): ${location}, ${date}`);
-              
-              // Determine the assignment type based on location
-              let assignmentType = location === "Management Time" ? "management" : 
-                                   location === "Education/Training" ? "education" : 
-                                   location.toLowerCase().includes("clinic") ? "clinic" : 
-                                   location.toLowerCase().includes("dispensary") ? "dispensary" : "requirement";
-              
-              // Create morning assignment for UI
-              const morningAssignment = {
-                location: location,
-                date: date,
-                startTime: "09:00",
-                endTime: "13:00",
-                technicianId: newTechnicianId,
-                type: assignmentType,
-                category: location.toLowerCase().includes("ward") ? "Ward" : ""
-              };
-              
-              // Create afternoon assignment for UI
-              const afternoonAssignment = {
-                location: location,
-                date: date,
-                startTime: "13:00",
-                endTime: "17:00",
-                technicianId: newTechnicianId,
-                type: assignmentType,
-                category: location.toLowerCase().includes("ward") ? "Ward" : ""
-              };
-              
-              // Return previous assignments plus the new ones
-              return [...prevAssignments, morningAssignment, afternoonAssignment];
-            }
-            
-            // For existing assignments, update them
             return prevAssignments.map(assignment => {
               // Match all assignments for this technician on this day
               // If location is provided, only update assignments for that location
@@ -1298,159 +1135,90 @@ export function TechnicianRotaView({
       else if (scope === "week") {
         console.log(`Making week-scope mutation call for week starting: ${date}`);
         
-        // Declare result outside the if-else to fix scope issues
-        let result: any;
-        
-        // If newTechnicianId is null, we're clearing assignments for the week
-        if (newTechnicianId === null) {
-          console.log(`Clearing technician assignments for week, location: ${location}`);
+        // For new assignments (empty cells), create assignments for all days of the week
+        if (isNewAssignment) {
+          console.log(`Creating new assignments for empty cell with week scope`);
           
-          // For clearing assignments, we need the original technician ID
-          if (!originalTechnicianId) {
-            console.log("Cannot clear assignments for an empty cell");
-            return;
-          }
+          // Track results for UI update
+          const createdAssignments: any[] = [];
           
-          // Use updateMultipleAssignments to clear assignments for this week
-          result = await updateMultipleAssignments({
-            rotaIdsByDate,
-            location, // Only clear assignments for this location
-            date,
-            originalTechnicianId: originalTechnicianId as Id<"technicians">,
-            // newTechnicianId is optional in updateMultipleAssignments for clearing
-            scope: "week"
-          });
-        }
-        // For empty cells with week scope, we'll add this technician to this location for all days in the week
-        else if (isEmptyCell) {
-          console.log(`Adding new technician to empty cell across the week: ${location}`);
-          
-          // Determine the assignment type based on location
-          let assignmentType = "requirement";
-          if (location === "Management Time") assignmentType = "management";
-          if (location === "Education/Training") assignmentType = "education";
-          if (location.toLowerCase().includes("clinic")) assignmentType = "clinic";
-          if (location.toLowerCase().includes("dispensary")) assignmentType = "dispensary";
-          
-          // Track overall success
-          let allSuccess = true;
-          const weekResults: Record<string, any> = {};
-          
-          // For each day in the week, add morning and afternoon assignments
-          for (const [dayDate, dayRotaId] of Object.entries(rotaIdsByDate)) {
-            // Add morning assignment (9:00-13:00)
+          // For each date in the week, create morning and afternoon assignments
+          for (const weekDate of Object.keys(rotaIdsByDate)) {
+            const weekDateRotaId = rotaIdsByDate[weekDate];
+            
+            // Create morning assignment (9:00-13:00)
             const morningResult = await updateRotaAssignment({
-              rotaId: dayRotaId as Id<"technicianRotas">,
+              rotaId: weekDateRotaId,
               location,
               startTime: "09:00",
               endTime: "13:00",
-              // No originalTechnicianId for empty cells
               newTechnicianId,
-              type: assignmentType
+              type: "requirement",
             });
             
-            // Add afternoon assignment (13:00-17:00)
+            if (morningResult && morningResult.success) {
+              createdAssignments.push({
+                technicianId: newTechnicianId,
+                location,
+                date: weekDate,
+                startTime: "09:00",
+                endTime: "13:00",
+                type: "requirement",
+                rotaId: weekDateRotaId
+              });
+            }
+            
+            // Create afternoon assignment (13:00-17:00)
             const afternoonResult = await updateRotaAssignment({
-              rotaId: dayRotaId as Id<"technicianRotas">,
+              rotaId: weekDateRotaId,
               location,
               startTime: "13:00",
               endTime: "17:00",
-              // No originalTechnicianId for empty cells
               newTechnicianId,
-              type: assignmentType
+              type: "requirement",
             });
             
-            weekResults[dayDate] = {
-              success: morningResult.success && afternoonResult.success,
-              message: `Added technician to ${location} for ${dayDate}`
-            };
-            
-            allSuccess = allSuccess && morningResult.success && afternoonResult.success;
+            if (afternoonResult && afternoonResult.success) {
+              createdAssignments.push({
+                technicianId: newTechnicianId,
+                location,
+                date: weekDate,
+                startTime: "13:00",
+                endTime: "17:00",
+                type: "requirement",
+                rotaId: weekDateRotaId
+              });
+            }
           }
           
-          // Combined result
-          result = {
-            success: allSuccess,
-            results: weekResults
-          };
-        } else {
-          // For cells with existing technicians, do a replacement
-          result = await updateMultipleAssignments({
+          if (createdAssignments.length > 0) {
+            console.log(`Created ${createdAssignments.length} new assignments for week scope`);
+            
+            // Update the local state to reflect all the new assignments
+            setRotaAssignments(prevAssignments => [
+              ...prevAssignments,
+              ...createdAssignments
+            ]);
+          }
+        }
+        // For existing assignments, update them as before
+        else {
+          // For week scope, we need to update all assignments for this technician across all days
+          const result = await updateMultipleAssignments({
             rotaIdsByDate,
             location, // Optional - if provided, only update assignments for this location
             date, // Still need to provide a date for reference
-            originalTechnicianId: originalTechnicianId as Id<"technicians">, // Type assertion to fix TS error
+            originalTechnicianId: originalTechnicianId!, // Use non-null assertion
             newTechnicianId,
             scope: "week",
             respectEAU: true // Respect EAU special rules
           });
-        }
-        
-        if (result && result.success) {
-          console.log("Technician replacement successful for week:", result);
+          
+          if (result && result.success) {
+            console.log("Technician replacement successful for week:", result);
           
           // Update the local state to reflect all changes across the week
           setRotaAssignments(prevAssignments => {
-            // If newTechnicianId is null, we're clearing assignments for the week
-            if (newTechnicianId === null) {
-              console.log(`Removing assignments from UI state for week, location: ${location}`);
-              // Filter out all assignments for this technician at this location across the week
-              return prevAssignments.filter(assignment => {
-                // If location is specified, only remove assignments for that location
-                const locationMatches = !location || assignment.location === location;
-                // Only process assignments within the dates of rotaIdsByDate
-                const dateInWeek = Object.keys(rotaIdsByDate).includes(assignment.date);
-                // Don't remove the assignment if it doesn't match our criteria
-                return !(dateInWeek && 
-                         locationMatches &&
-                         assignment.technicianId === originalTechnicianId);
-              });
-            }
-            // For empty cells, we need to add new assignments to the UI state for all days in the week
-            if (isEmptyCell) {
-              console.log(`Adding new assignments to UI state for empty cell (week scope): ${location}`);
-              
-              // Determine the assignment type based on location
-              let assignmentType = location === "Management Time" ? "management" : 
-                                   location === "Education/Training" ? "education" : 
-                                   location.toLowerCase().includes("clinic") ? "clinic" : 
-                                   location.toLowerCase().includes("dispensary") ? "dispensary" : "requirement";
-              
-              // Create new assignments for each day in the week
-              const newAssignments = [];
-              
-              // For each day in the week, add morning and afternoon assignments
-              for (const dayDate of Object.keys(rotaIdsByDate)) {
-                // Create morning assignment for UI
-                const morningAssignment = {
-                  location: location,
-                  date: dayDate,
-                  startTime: "09:00",
-                  endTime: "13:00",
-                  technicianId: newTechnicianId,
-                  type: assignmentType,
-                  category: location.toLowerCase().includes("ward") ? "Ward" : ""
-                };
-                
-                // Create afternoon assignment for UI
-                const afternoonAssignment = {
-                  location: location,
-                  date: dayDate,
-                  startTime: "13:00",
-                  endTime: "17:00",
-                  technicianId: newTechnicianId,
-                  type: assignmentType,
-                  category: location.toLowerCase().includes("ward") ? "Ward" : ""
-                };
-                
-                newAssignments.push(morningAssignment, afternoonAssignment);
-              }
-              
-              // Return previous assignments plus the new ones
-              return [...prevAssignments, ...newAssignments];
-            }
-            
-            // For existing assignments, update them
             return prevAssignments.map(assignment => {
               // Match all assignments for this technician across all days
               // If location is provided, only update assignments for that location
@@ -1466,9 +1234,10 @@ export function TechnicianRotaView({
               return assignment;
             });
           });
-        } else {
-          console.warn("Technician replacement for week might have failed:", result);
-          // TODO: Provide user feedback for failure
+          } else {
+            console.warn("Technician replacement for week might have failed:", result);
+            // TODO: Provide user feedback for failure
+          }
         }
       } else {
         console.warn(`Unknown scope "${scope}" for technician replacement.`);
@@ -1736,6 +1505,8 @@ export function TechnicianRotaView({
   const [freeCellText, setFreeCellText] = useState<Record<string, string>>({});
   const [technicianWorkingDays, setTechnicianWorkingDays] = useState<Record<string, string[]>>({});
   const [selectedWeekdays, setSelectedWeekdays] = useState<string[]>(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]);
+  const [selectedTechnicianForReport, setSelectedTechnicianForReport] = useState<Id<"technicians"> | null>(null);
+  const [showTechnicianReport, setShowTechnicianReport] = useState(false);
   // rotaIdsByDate is already declared at the top of the component
   const [rotaAssignments, setRotaAssignments] = useState<any[]>(initialRotaAssignments || []);
   const [weekdaysConfirmed, setWeekdaysConfirmed] = useState<boolean>(false);
@@ -3132,229 +2903,6 @@ const generateWeeklyTechnicianRota = async () => {
             <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11a1 1 0 10-2 0v3.586L7.707 9.293a1 1 0 00-1.414 1.414l3 3a1 1 0 001.414 0l3-3a1 1 0 00-1.414-1.414L11 10.586V7z" clipRule="evenodd" />
           </svg>
           <span className="font-bold">SINGLE SLOT SWAP MODE</span>
-        </div>
-      )}
-      
-      {/* Technician Schedule Report Modal */}
-      {showTechnicianReport && selectedTechnicianForReport && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl w-full max-w-5xl max-h-[90vh] flex flex-col">
-            <div className="flex justify-between items-center p-4 border-b">
-              <h2 className="text-xl font-semibold">
-                Weekly Schedule for {technicians.find(t => t._id === selectedTechnicianForReport)?.displayName || technicians.find(t => t._id === selectedTechnicianForReport)?.name || 'Technician'}
-              </h2>
-              <button
-                onClick={() => setShowTechnicianReport(false)}
-                className="text-gray-500 hover:text-gray-700"
-              >
-                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            <div className="overflow-auto flex-1">
-              <table className="min-w-full border-collapse">
-                <thead>
-                  <tr className="bg-gray-100">
-                    <th className="p-2 border text-left">Day</th>
-                    <th className="p-2 border text-left">Time</th>
-                    <th className="p-2 border text-left">Location</th>
-                    <th className="p-2 border text-left">Type</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {Array.from({ length: 5 }).map((_, dayOffset) => {
-                    const date = new Date(selectedMonday);
-                    date.setDate(date.getDate() + dayOffset);
-                    const dayName = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"][dayOffset];
-                    const isoDate = date.toISOString().split('T')[0];
-                    
-                    // Get all assignments for this technician on this day
-                    const dayAssignments = rotaAssignments.filter(a => 
-                      a.technicianId === selectedTechnicianForReport && 
-                      a.date === isoDate
-                    );
-                    
-                    if (dayAssignments.length === 0) return null;
-                    
-                    // Define standard time slots
-                    const standardTimeSlots = [
-                      { start: '09:00', end: '13:00' },
-                      { start: '13:00', end: '17:00' }
-                    ];
-                    
-                    // Process assignments into time slots
-                    const timeSlotAssignments = standardTimeSlots.map(slot => {
-                      // Find all assignments that overlap with this time slot
-                      const allAssignments = dayAssignments.filter(assignment => {
-                        const assignmentStart = assignment.startTime || '00:00';
-                        const assignmentEnd = assignment.endTime || '23:59';
-                        
-                        // Check if assignment overlaps with current time slot
-                        return (
-                          (assignmentStart <= slot.start && assignmentEnd > slot.start) || // starts before and ends during/after
-                          (assignmentStart >= slot.start && assignmentStart < slot.end)  // starts during
-                        );
-                      });
-                      
-                      return {
-                        ...slot,
-                        assignments: allAssignments
-                      };
-                    });
-                    
-                    return timeSlotAssignments.map((slot, timeIndex) => {
-                      const { start, end, assignments } = slot;
-                      const hasAssignments = assignments.length > 0;
-                      
-                      // If no assignments and it's not the first row, skip this time slot
-                      if (!hasAssignments && timeIndex > 0) return null;
-                      
-                      return (
-                        <tr key={`${dayOffset}-${timeIndex}`} className={timeIndex % 2 === 0 ? 'bg-white' : 'bg-gray-50'}>
-                          {timeIndex === 0 && (
-                            <td className="p-2 border" rowSpan={timeSlotAssignments.filter(ts => ts.assignments.length > 0).length || 1}>
-                              {dayName}<br />
-                              <span className="text-xs text-gray-500">{isoDate}</span>
-                            </td>
-                          )}
-                          <td className="p-2 border">{start} - {end}</td>
-                          <td className="p-2 border">
-                            {hasAssignments ? (
-                              assignments.map((a, idx) => (
-                                <div 
-                                  key={idx} 
-                                  className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
-                                    a.type === 'requirement' 
-                                      ? 'text-green-700 font-medium'
-                                      : a.type === 'dispensary' 
-                                        ? 'text-purple-700 font-medium' 
-                                        : a.type === 'clinic' 
-                                          ? 'text-red-600 font-medium'
-                                          : a.type === 'management' 
-                                            ? 'text-blue-600 font-medium' 
-                                            : a.type === 'education' 
-                                              ? 'text-orange-600 font-medium'
-                                              : a.type === 'unavailable' 
-                                                ? 'text-gray-600 font-medium' 
-                                                : ''
-                                  }`}
-                                >
-                                  {a.location}
-                                </div>
-                              ))
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                          <td className="p-2 border">
-                            {hasAssignments ? (
-                              assignments.map((a, idx) => (
-                                <div 
-                                  key={idx} 
-                                  className={`${idx > 0 ? 'mt-1 pt-1 border-t' : ''} ${
-                                    a.type === 'requirement' 
-                                      ? 'text-green-700 font-medium'
-                                      : a.type === 'dispensary' 
-                                        ? 'text-purple-700 font-medium' 
-                                        : a.type === 'clinic' 
-                                          ? 'text-red-600 font-medium'
-                                          : a.type === 'management' 
-                                            ? 'text-blue-600 font-medium' 
-                                            : a.type === 'education' 
-                                              ? 'text-orange-600 font-medium'
-                                              : a.type === 'unavailable' 
-                                                ? 'text-gray-600 font-medium' 
-                                                : ''
-                                  }`}
-                                >
-                                  {a.type === 'unavailable' 
-                                    ? 'Unavailable' 
-                                    : a.type === 'management' 
-                                      ? 'Management Time' 
-                                      : a.type === 'education'
-                                        ? 'Education/Training'
-                                        : a.type.charAt(0).toUpperCase() + a.type.slice(1)}
-                                </div>
-                              ))
-                            ) : (
-                              <span className="text-gray-400">-</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    }).filter(Boolean); // Remove any null entries from filtered time slots
-                  }).filter(Boolean)} {/* Filter out days with no assignments */}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-4 flex justify-end p-4">
-              <button
-                onClick={() => setShowTechnicianReport(false)}
-                className="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-      
-      {/* Technician Report Controls - Added under the table */}
-      {rotaGenerated && rotaAssignments.length > 0 && (
-        <div className="mt-6 mx-4 p-4 bg-gray-50 rounded-lg border border-gray-200">
-          <h3 className="text-lg font-semibold mb-3 text-gray-800">Technician Schedule Report</h3>
-          <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-end">
-            <div className="w-full sm:flex-1">
-              <label htmlFor="technician-select" className="block text-sm font-medium text-gray-700 mb-1">
-                Select Technician
-              </label>
-              <select
-                id="technician-select"
-                value={selectedTechnicianForReport || ''}
-                onChange={(e) => setSelectedTechnicianForReport(e.target.value as Id<"technicians">)}
-                className="w-full bg-white border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-              >
-                <option value="">Choose a technician...</option>
-                {Array.from(new Set(rotaAssignments
-                  .filter(a => a.technicianId) 
-                  .map(a => a.technicianId)
-                ))
-                .map(technicianId => ({
-                  id: technicianId,
-                  technician: technicians.find(t => t._id === technicianId)
-                }))
-                .filter(item => item.technician) // Filter out any undefined technicians
-                .sort((a, b) => {
-                  // Sort by displayName or name, case-insensitive
-                  const nameA = (a.technician?.displayName || a.technician?.name || '').toLowerCase();
-                  const nameB = (b.technician?.displayName || b.technician?.name || '').toLowerCase();
-                  return nameA.localeCompare(nameB);
-                })
-                .map(({ id, technician }) => (
-                  <option key={id} value={id}>
-                    {technician ? (technician.displayName || technician.name) : 'Unknown'}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <button
-              onClick={() => selectedTechnicianForReport && setShowTechnicianReport(true)}
-              disabled={!selectedTechnicianForReport}
-              className="w-full sm:w-auto bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-md text-sm font-medium whitespace-nowrap transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              title={!selectedTechnicianForReport ? 'Please select a technician first' : 'View weekly schedule'}
-            >
-              <span className="flex items-center justify-center">
-                <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
-                </svg>
-                View Weekly Schedule
-              </span>
-            </button>
-          </div>
-          <p className="text-sm text-gray-600 mt-2">
-            View a detailed weekly schedule for the selected technician
-          </p>
         </div>
       )}
     </div>

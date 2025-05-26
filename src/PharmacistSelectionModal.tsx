@@ -1,20 +1,52 @@
 import { Id } from "../convex/_generated/dataModel";
 import { useQuery } from "convex/react";
 import { api } from "../convex/_generated/api";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
 interface PharmacistSelectionModalProps {
   isOpen: boolean;
   onClose: () => void;
   onSelect: (pharmacistId: Id<"pharmacists">, scope: "slot" | "day" | "week") => void;
+  onSelectMultiple?: (pharmacistIds: Id<"pharmacists">[], scope: "slot" | "day" | "week", removedPharmacistIds?: Id<"pharmacists">[]) => void;
   currentPharmacistId: Id<"pharmacists"> | null;
   location: string;
+  allowMultipleSelection?: boolean;
+  existingPharmacistIds?: Id<"pharmacists">[];
 }
 
-export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPharmacistId, location }: PharmacistSelectionModalProps) {
+export function PharmacistSelectionModal({ 
+  isOpen, 
+  onClose, 
+  onSelect, 
+  onSelectMultiple,
+  currentPharmacistId, 
+  location,
+  allowMultipleSelection = false,
+  existingPharmacistIds = []
+}: PharmacistSelectionModalProps) {
   const pharmacists = useQuery(api.pharmacists.list) || [];
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedScope, setSelectedScope] = useState<"slot" | "day" | "week">("slot");
+  const [selectedPharmacistIds, setSelectedPharmacistIds] = useState<Id<"pharmacists">[]>([]);
+  const [initialPharmacistIds, setInitialPharmacistIds] = useState<Id<"pharmacists">[]>([]);
+  
+  // Initialize selected pharmacists when the modal opens
+  useEffect(() => {
+    let initialIds: Id<"pharmacists">[] = [];
+    
+    // If there are existing pharmacists in this cell, add them
+    if (existingPharmacistIds && existingPharmacistIds.length > 0) {
+      initialIds = [...existingPharmacistIds];
+    }
+    
+    // Also add the current pharmacist if provided and not already included
+    if (currentPharmacistId && !initialIds.includes(currentPharmacistId)) {
+      initialIds.push(currentPharmacistId);
+    }
+    
+    setSelectedPharmacistIds(initialIds);
+    setInitialPharmacistIds(initialIds);
+  }, [currentPharmacistId, existingPharmacistIds]);
 
   if (!isOpen) return null;
 
@@ -32,8 +64,33 @@ export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPha
     });
 
   const handleSelect = (pharmacistId: Id<"pharmacists">) => {
-    onSelect(pharmacistId, selectedScope);
-    onClose();
+    if (!allowMultipleSelection) {
+      // Single selection mode
+      onSelect(pharmacistId, selectedScope);
+      onClose();
+    } else {
+      // Toggle selection in multiple selection mode
+      setSelectedPharmacistIds(prev => {
+        if (prev.includes(pharmacistId)) {
+          return prev.filter(id => id !== pharmacistId);
+        } else {
+          return [...prev, pharmacistId];
+        }
+      });
+    }
+  };
+  
+  const handleConfirmMultipleSelection = () => {
+    if (onSelectMultiple) {
+      // Find pharmacists that were initially selected but now deselected
+      const removedPharmacistIds = initialPharmacistIds.filter(
+        id => !selectedPharmacistIds.includes(id)
+      );
+      
+      // Pass both selected and removed pharmacists
+      onSelectMultiple(selectedPharmacistIds, selectedScope, removedPharmacistIds);
+      onClose();
+    }
   };
 
   return (
@@ -41,7 +98,7 @@ export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPha
       <div className="bg-white rounded-lg p-6 max-w-md w-full max-h-[80vh] flex flex-col">
         <div className="flex justify-between items-center mb-4">
           <div>
-            <h2 className="text-xl font-bold">Select Pharmacist</h2>
+            <h2 className="text-xl font-bold">{allowMultipleSelection ? "Select Pharmacists" : "Select Pharmacist"}</h2>
             <p className="text-sm text-gray-600 mt-1">For: {location}</p>
           </div>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-700">
@@ -85,19 +142,57 @@ export function PharmacistSelectionModal({ isOpen, onClose, onSelect, currentPha
         <div className="flex-1 overflow-y-auto">
           <div className="space-y-2">
             {filteredPharmacists.map((pharmacist) => (
-              <button
+              <div
                 key={pharmacist._id}
-                onClick={() => handleSelect(pharmacist._id)}
-                className={`w-full text-left p-3 rounded-lg hover:bg-gray-100 ${currentPharmacistId === pharmacist._id ? 'bg-blue-50 ring-2 ring-blue-500' : ''}`}
+                className={`w-full text-left p-3 rounded-lg hover:bg-gray-100 ${(
+                  allowMultipleSelection 
+                    ? selectedPharmacistIds.includes(pharmacist._id)
+                    : currentPharmacistId === pharmacist._id
+                ) ? 'bg-blue-50 ring-1 ring-blue-300' : ''}`}
               >
-                <div className="font-medium">{pharmacist.name}</div>
-                <div className="text-sm text-gray-500">
-                  Band {pharmacist.band} • {pharmacist.primaryDirectorate || 'No default directorate'}
+                <div className="flex items-center gap-2">
+                  {allowMultipleSelection ? (
+                    <input
+                      type="checkbox"
+                      checked={selectedPharmacistIds.includes(pharmacist._id)}
+                      onChange={() => handleSelect(pharmacist._id)}
+                      className="h-4 w-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                    />
+                  ) : null}
+                  <div className="flex-grow">
+                    <div className="font-medium">{pharmacist.name}</div>
+                    <div className="text-sm text-gray-500">
+                      Band {pharmacist.band} • {pharmacist.primaryDirectorate || 'No default directorate'}
+                    </div>
+                  </div>
+                  {!allowMultipleSelection && (
+                    <button
+                      onClick={() => handleSelect(pharmacist._id)}
+                      className="px-3 py-1 bg-blue-500 text-white text-sm rounded hover:bg-blue-600"
+                    >
+                      Select
+                    </button>
+                  )}
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         </div>
+        
+        {/* Add a confirm button for multiple selection */}
+        {allowMultipleSelection && (
+          <div className="mt-4 flex justify-end">
+            <p className="text-center text-sm font-medium mb-2">
+              {selectedPharmacistIds.length} pharmacist{selectedPharmacistIds.length !== 1 ? "s" : ""} selected
+            </p>
+            <button
+              className={`mt-4 px-4 py-2 rounded-lg w-full font-medium text-white bg-blue-500 hover:bg-blue-600`}
+              onClick={handleConfirmMultipleSelection}
+            >
+              {selectedPharmacistIds.length > 0 ? "Confirm Selection" : "Clear All Pharmacists"}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
